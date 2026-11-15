@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Launch Radar — pre-token protocols priced off the snapshot</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="app.css">
+<script src="model.js"></script>
+<script src="../data.js"></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="dot"></span> Launch Radar</div>
+  <div class="topsub" id="topsub"></div>
+  <div class="badges"><span class="badge" id="badge-watch"></span><span class="badge" id="badge-page"></span></div>
+</header>
+
+<main id="view-board" class="view">
+  <section class="hero">
+    <div class="hero-left">
+      <h1 id="hero-title"></h1>
+      <p id="hero-text"></p>
+      <div class="stats" id="hero-stats"></div>
+    </div>
+    <div class="hero-right">
+      <div class="panel">
+        <h2>How a launch is priced</h2>
+        <div class="formula" id="formula"></div>
+        <table class="kv" id="validation-mini"></table>
+        <p class="fine" id="best-net"></p>
+      </div>
+      <div class="panel">
+        <h2>Traded tokens and the curve</h2>
+        <div id="scatter-main"></div>
+        <p class="fine" id="scatter-note"></p>
+      </div>
+    </div>
+  </section>
+
+  <nav class="tabs" id="tabs"></nav>
+
+  <section class="filters" id="filters">
+    <label>Search <input id="f-search" type="text" placeholder="name, category or chain"></label>
+    <label>Category <select id="f-cat"></select></label>
+    <label>Chain <select id="f-chain"></select></label>
+    <label>Verdict <select id="f-verdict"><option value="">All</option><option>FARM</option><option>THIN</option><option>SKIP</option></select></label>
+    <label>Min TVL <select id="f-tvlf"><option value="0">Any</option><option value="10000000">$10M</option><option value="50000000">$50M</option><option value="100000000">$100M</option><option value="500000000">$500M</option><option value="1000000000">$1B</option></select></label>
+    <label>Capital <select id="f-cap"><option value="1000">$1.0K</option><option value="10000">$10K</option><option value="100000">$100K</option></select></label>
+    <label>Airdrop share <select id="f-share"><option value="0.1">10% of value</option><option value="0.05">5% of value</option><option value="0.2">20% of value</option></select></label>
+    <span class="shown" id="shown"></span>
+    <button id="f-reset" type="button">Reset</button>
+  </section>
+
+  <section class="boardwrap">
+    <table class="board" id="board">
+      <thead><tr>
+        <th data-sort="rank">#</th><th data-sort="name">Protocol</th><th data-sort="tvl">TVL</th>
+        <th data-sort="change">7D</th><th data-sort="age">No token for</th>
+        <th data-sort="implied">Implied value · P25 to P75</th><th data-sort="slice">$1.0K slice</th>
+        <th data-sort="net">Net of all costs</th><th>Farm · fees · hold</th>
+      </tr></thead>
+      <tbody id="board-body"></tbody>
+    </table>
+    <div id="list-alt"></div>
+  </section>
+  <p class="fine" id="board-foot"></p>
+</main>
+
+<main id="view-detail" class="view" hidden>
+  <p><a href="#" id="back-board">Back to the board</a> <span id="detail-crumb" class="fine"></span></p>
+  <div id="detail"></div>
+</main>
+
+<main id="view-method" class="view" hidden>
+  <p><a href="#" id="back-board-2">Back to the board</a></p>
+  <div id="method"></div>
+</main>
+
+<footer class="fine" id="foot"></footer>
+</body>
+</html>
