@@ -53,12 +53,14 @@ table.board{width:100%;border-collapse:collapse;font-size:13px}
 .v-SKIP{color:var(--red);font-weight:700}
 .rangebar{position:relative;height:6px;background:#2a2f38;border-radius:3px;margin-top:5px;min-width:90px}
 .rangebar i{position:absolute;top:0;bottom:0;background:var(--amber);border-radius:3px}
+.rangebar b{position:absolute;top:-2px;bottom:-2px;width:2px;background:#fff;border-radius:1px}
 .cards{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:12px 0}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
 .card span{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
 .card b{display:block;font-size:21px;margin-top:4px}
 .card small{color:var(--muted);font-size:12px}
 .build{width:100%;border-collapse:collapse;font-size:13px}
+.build th{padding:7px 4px;border-bottom:1px solid var(--line);font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);text-align:left}
 .build td{padding:7px 4px;border-bottom:1px solid var(--line)}
 .build td:last-child{text-align:right;font-family:var(--mono)}
 .build tr.total td{font-weight:700;border-top:2px solid var(--line)}
@@ -68,6 +70,7 @@ table.board{width:100%;border-collapse:collapse;font-size:13px}
 .steps td:nth-child(3),.steps td:nth-child(4){text-align:right;font-family:var(--mono);white-space:nowrap}
 .sens{border-collapse:collapse;font-size:12.5px;margin-top:8px}
 .sens th,.sens td{border:1px solid var(--line);padding:6px 10px;text-align:right;font-family:var(--mono)}
+.sens th.base,.sens td.base{background:#232830;font-weight:700}
 .sens th:first-child,.sens td:first-child{text-align:left;font-family:inherit}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:14px 0}
 h3{margin:18px 0 8px;font-size:15px}

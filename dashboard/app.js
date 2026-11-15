@@ -41,11 +41,12 @@
     return (v > 0 ? "+" : "") + v.toFixed(1) + "%";
   }
   // Slice economics recomputed live from capital and airdrop share.
+  // Same formula as the build: capital / (TVL + capital) of the value.
   function econ(r) {
-    var slice = state.capital * (r.implied_value_usd / r.tvl_usd) * state.share;
+    var slice = state.capital * (r.implied_value_usd / (r.tvl_usd + state.capital)) * state.share;
     var tbill = state.capital * D.tbillYear * D.farmDays / 365;
     var net = slice - r.fees_usd - tbill;
-    var verdict = net > 2 ? "FARM" : net < -5 ? "SKIP" : "THIN";
+    var verdict = net > 0 ? "FARM" : (slice - r.fees_usd > 0 ? "THIN" : "SKIP");
     return { slice: slice, tbill: tbill, net: net, verdict: verdict };
   }
 
@@ -102,7 +103,7 @@
     $("badge-watch").textContent = "Watchlist " + D.watchlistCovered + "/" + D.watchlistCount + " on board";
     $("badge-page").textContent = "Page = board.json " + D.rows.length + "/" + D.rows.length + " rows";
     $("hero-title").textContent = D.rows.length + " protocols record no token. Here is what each launch would be worth, and what farming it costs.";
-    $("hero-text").textContent = "Each value is read off a curve fitted to the " + D.curve.n + " tokens that already trade, then adjusted for 7-day TVL growth and time without a token. No name is hand-picked. Every row has a farm plan with a dollar cost and minutes per step, netted against the T-bill yield the capital gives up.";
+    $("hero-text").textContent = "Each value is read off a curve fitted to the " + D.curve.n + " tokens that already trade, then adjusted for family and for 7-day TVL growth carried two weeks forward. Time without a token does not move the price: the snapshot cannot confirm an age effect, so the model does not invent one. No name is hand-picked. Every row has a farm plan with a dollar cost and minutes per step, netted against the T-bill yield the capital gives up.";
     var st = $("hero-stats");
     st.innerHTML =
       '<div class="stat"><b>' + D.rows.length + '</b><span>ranked, no token</span></div>' +
@@ -233,10 +234,11 @@
     $("board-body").innerHTML = rows.map(function (r) {
       var e = econ(r);
       var tags = (r.watchlist ? '<span class="tag wl">Watchlist</span>' : "") + (r.age_years < 1 ? '<span class="tag early">Early</span>' : "");
-      // P25-P75 bar positioned inside the P10-P90 interval on a log scale.
+      // Full P10-P90 interval on a log scale, with a tick at the point
+      // estimate. The interval is wide because launches are genuinely
+      // uncertain; the bar shows it instead of hiding it.
       var lo = Math.log10(r.p10_usd), hi = Math.log10(r.p90_usd);
-      var left = hi > lo ? Math.max(0, (Math.log10(r.p25_usd) - lo) / (hi - lo) * 100) : 0;
-      var width = hi > lo ? Math.max(4, (Math.log10(r.p75_usd) - Math.log10(r.p25_usd)) / (hi - lo) * 100) : 100;
+      var tick = hi > lo ? Math.max(0, Math.min(100, (Math.log10(r.implied_value_usd) - lo) / (hi - lo) * 100)) : 50;
       return "<tr>" +
         "<td class='num'>" + r.rank + "</td>" +
         "<td><a href='?view=detail&slug=" + encodeURIComponent(r.slug) + "' class='proto'>" + esc(r.name) + "</a>" + tags +
@@ -244,11 +246,11 @@
         "<td class='num'>" + money(r.tvl_usd) + "</td>" +
         "<td class='num'>" + changeText(r) + "</td>" +
         "<td class='num'>" + ageText(r) + "</td>" +
-        "<td class='num'>" + money(r.implied_value_usd) + "<br><span class='fine'>" + money(r.p25_usd) + " – " + money(r.p75_usd) + "</span>" +
-        "<span class='rangebar'><i style='left:" + left.toFixed(0) + "%;width:" + width.toFixed(0) + "%'></i></span></td>" +
+        "<td class='num'>" + money(r.implied_value_usd) + "<br><span class='fine'>" + money(r.p10_usd) + " – " + money(r.p90_usd) + "</span>" +
+        "<span class='rangebar'><i style='left:0;width:100%'></i><b style='left:" + tick.toFixed(0) + "%'></b></span></td>" +
         "<td class='num'>" + money(e.slice) + "</td>" +
         "<td class='num'><span class='v-" + e.verdict + "'>" + e.verdict + " " + signed(e.net) + "</span><br><span class='fine'>" + (e.net < 0 ? "never beats a T-bill" : "beats a T-bill") + "</span></td>" +
-        "<td>" + esc(r.farm_method) + " · " + esc((r.chains || [])[0] || "") + "<br><span class='fine'>" + money(r.farm_cost_usd) + " fees · " + (r.farm_minutes / 60).toFixed(1) + "h work</span></td>" +
+        "<td>" + esc(r.farm_method) + " · " + esc(r.farm_chain || (r.chains || [])[0] || "") + "<br><span class='fine'>" + money(r.farm_cost_usd) + " fees · " + (r.farm_minutes / 60).toFixed(1) + "h work</span></td>" +
         "</tr>";
     }).join("");
     $("list-alt").innerHTML = "";
@@ -298,7 +300,7 @@
     var html = "<h1 style='margin:4px 0'>" + esc(r.name) + (r.watchlist ? ' <span class="tag wl">Watchlist</span>' : "") + "</h1>" +
       "<p class='fine'>DefiLlama records no token for " + esc(r.name) + " (no CoinGecko id, ticker or market cap) as of " + D.asOf + ". A record is not proof: check your own channels before farming.</p>" +
       '<div class="cards">' +
-      '<div class="card"><span>Implied value</span><b>' + money(r.implied_value_usd) + '</b><small>P25 ' + money(r.p25_usd) + ' to P75 ' + money(r.p75_usd) + '</small></div>' +
+      '<div class="card"><span>Implied value</span><b>' + money(r.implied_value_usd) + '</b><small>P10 ' + money(r.p10_usd) + ' to P90 ' + money(r.p90_usd) + '</small></div>' +
       '<div class="card"><span>TVL</span><b>' + money(r.tvl_usd) + '</b><small>' + changeText(r) + ' over 7 days</small></div>' +
       '<div class="card"><span>No token for</span><b>' + ageText(r) + '</b><small>tracked since ' + esc(r.listed_at || "—") + '</small></div>' +
       '<div class="card"><span>' + money(state.capital) + ' slice</span><b>' + money(e.slice) + '</b><small>at ' + Math.round(state.share * 100) + '% of value</small></div>' +
@@ -307,14 +309,14 @@
       '<div class="grid2"><div class="panel"><h2>How ' + money(r.implied_value_usd) + ' is built</h2><table class="build">' +
       "<tr><td>Size curve</td><td>" + money(r.base_usd) + "</td></tr>" +
       "<tr><td>Family ×" + r.family_factor.toFixed(2) + "</td><td>" + esc(r.category || "—") + "</td></tr>" +
-      "<tr><td>Growth ×" + r.growth_factor.toFixed(2) + "</td><td>" + changeText(r) + " over 7 days</td></tr>" +
-      "<tr><td>Seasoning ×" + r.seasoning_factor.toFixed(2) + "</td><td>" + ageText(r) + " with no token</td></tr>" +
-      "<tr><td>Sibling ×" + r.sibling_factor.toFixed(2) + "</td><td>no adjustment: a shared first word is a name, not evidence</td></tr>" +
+      "<tr><td>Growth ×" + r.growth_factor.toFixed(2) + "</td><td>" + changeText(r) + " over 7 days, carried two more weeks</td></tr>" +
+      "<tr><td>Seasoning ×" + r.seasoning_factor.toFixed(2) + "</td><td>no confirmed age effect (r = " + D.validation.factorCheck.corrDays.toFixed(2) + ")</td></tr>" +
+      "<tr><td>Sibling ×" + r.sibling_factor.toFixed(2) + "</td><td>" + (r.sibling_factor < 1 ? "shares a first word with a traded token — half value" : "no adjustment") + "</td></tr>" +
       '<tr class="total"><td>Implied value</td><td>' + money(r.implied_value_usd) + "</td></tr>" +
-      "<tr><td>Blind range, P25 to P75</td><td>" + money(r.p25_usd) + " to " + money(r.p75_usd) + "</td></tr>" +
       "<tr><td>Blind range, P10 to P90</td><td>" + money(r.p10_usd) + " to " + money(r.p90_usd) + "</td></tr>" +
+      "<tr><td>Blind range, P25 to P75</td><td>" + money(r.p25_usd) + " to " + money(r.p75_usd) + "</td></tr>" +
       "</table><p class='fine'>Recomputed on this page: board.json carries the same " + money(r.implied_value_usd) + " at rank " + r.rank + ".</p></div>" +
-      '<div class="panel"><h2>Farm plan · ' + esc(r.farm_method) + " on " + esc((r.chains || [])[0] || "") + " · " + money(state.capital) + " for " + D.farmDays + " days</h2>" +
+      '<div class="panel"><h2>Farm plan · ' + esc(r.farm_method) + " on " + esc(r.farm_chain || (r.chains || [])[0] || "") + " · " + money(state.capital) + " for " + D.farmDays + " days</h2>" +
       "<table class='steps'>" + r.farm_steps.map(function (s, i) {
         var gas = (r.fees_usd - 4.5) / 2;
         var costs = [gas, 0, gas, 0, 0, 1.5, 3.0];
@@ -323,19 +325,19 @@
       }).join("") + "</table>" +
       "<p class='fine'>Slice " + money(e.slice) + " · Fees " + money(r.fees_usd) + " · T-bill forgone " + money(e.tbill) + " · Net " + signed(e.net) + " · Work " + (r.farm_minutes / 60).toFixed(1) + "h</p></div></div>" +
       '<div class="panel"><h2>Against traded peers</h2><div id="scatter-detail"></div><p class="fine">Nearest trading tokens by TVL. Green: the five nearest. The curve is the same size curve as the board.</p>' +
-      "<table class='build'>" + peers.map(function (q) {
-        return "<tr><td>" + esc(q.name) + "</td><td>" + money(q.tvl) + " · " + money(q.mcap) + " · " + (q.mcap / q.tvl).toFixed(2) + "x</td></tr>";
+      "<table class='build'><tr><th>Protocol</th><th class='num'>TVL</th><th class='num'>Market cap</th><th class='num'>Mcap / TVL</th></tr>" + peers.map(function (q) {
+        return "<tr><td>" + esc(q.name) + "</td><td class='num'>" + money(q.tvl) + "</td><td class='num'>" + money(q.mcap) + "</td><td class='num'>" + (q.mcap / q.tvl).toFixed(2) + "x</td></tr>";
       }).join("") + "</table></div>" +
-      "<h3>Net at a drop in the launch price</h3>" +
-      "<table class='sens'><tr><th></th><th>5% drop</th><th>10% drop</th><th>20% drop</th></tr>" +
+      "<h3>Net at a different airdrop share</h3>" +
+      "<table class='sens'><tr><th></th><th>5% of value</th><th class='base'>10% of value</th><th>20% of value</th></tr>" +
       [1000, 10000, 100000].map(function (cap) {
-        return "<tr><td>" + money(cap) + "</td>" + [0.05, 0.1, 0.2].map(function (drop) {
-          var sl = cap * (r.implied_value_usd / r.tvl_usd) * state.share * (1 - drop);
+        return "<tr><td>" + money(cap) + "</td>" + [0.05, 0.1, 0.2].map(function (share, si) {
+          var sl = cap * (r.implied_value_usd / (r.tvl_usd + cap)) * share;
           var net = sl - r.fees_usd - cap * D.tbillYear * D.farmDays / 365;
-          return "<td>" + signed(net) + "</td>";
+          return "<td" + (si === 1 ? " class='base'" : "") + ">" + signed(net) + "</td>";
         }).join("") + "</tr>";
       }).join("") + "</table>" +
-      "<p class='fine'>A 10% drop beats every cost from $1.0K of capital: the pool pays one. Capital yield is not counted; it is upside if the vault pays one.</p>";
+      "<p class='fine'>At a 5% share the slice is half the base case; at 20% it is double. The share is a working guess, not a promise. If the launch price falls 20% from the implied value, the $1.0K net at a 10% share is " + signed(1000 * (r.implied_value_usd / (r.tvl_usd + 1000)) * 0.1 * 0.8 - r.fees_usd - 1000 * D.tbillYear * D.farmDays / 365) + ". Capital yield is not counted; it is upside if the vault pays one.</p>";
     $("detail").innerHTML = html;
     scatter($("scatter-detail"), { highlight: { tvl: r.tvl_usd, implied: r.implied_value_usd }, peers: peers });
     $("back-board").onclick = function (ev) { ev.preventDefault(); showView("board"); renderBoard(); };
@@ -350,23 +352,29 @@
     $("method").innerHTML =
       "<h1 style='margin:4px 0'>Method and backtest</h1>" +
       "<p class='fine'>One model.js prices the page and board.json. Everything below is computed from the sealed snapshot at run time; no protocol name is hardcoded anywhere in the model.</p>" +
+      "<h3>Universe</h3><p>" + D.totalProtocols + " protocols over $5M TVL as of " + D.asOf + ". " + D.tradedCount + " record a token and are kept apart from the board. " + D.preTokenCount + " record no token; " + D.setAsideCount + " of those are set aside by house rule, leaving " + D.rows.length + " ranked. A record is not proof: DefiLlama records no token, so check your own channels before farming.</p>" +
       "<h3>The model</h3><p>Value = 10^" + (Math.log10(D.curve.per100m)).toFixed(2) + " x (TVL / $100M)^" + D.curve.b.toFixed(3) + " x family x growth x seasoning x sibling. " +
-      "The size curve is a least-squares fit of log10(market cap) on log10(TVL) over the " + D.curve.n + " tokens that already trade: log10(mcap) = " + D.curve.a.toFixed(4) + " + " + D.curve.b.toFixed(4) + " x log10(TVL). " +
+      "The size curve is a least-squares fit of log10(market cap) on log10(TVL): log10(mcap) = " + D.curve.a.toFixed(4) + " + " + D.curve.b.toFixed(4) + " x log10(TVL). " +
+      "One point per traded token: listings that share a token are merged and their TVL summed (no-op on this snapshot — no traded token is listed twice); bridges and version listings are dropped (" + D.fitSet.bridge + " + " + D.fitSet.version + "); ratios past 1/500 or 50x are trimmed (" + D.fitSet.ratio + "); centralised-exchange tokens are dropped (" + D.fitSet.cex + "). " + D.fitSet.kept + " points remain from " + D.fitSet.from + ". " +
       "Family is the median log residual of a protocol's category, shrunk toward 1 by n / (n + 10), so a family with two tokens cannot move the board. " +
-      "Growth is 1 + 7-day TVL change, clamped to 0.8–1.3. Seasoning is 0.95 per year without a token, clamped to 0.7–1.0. " +
-      "Sibling is 1.00 either way: a shared first word is a name, not evidence.</p>" +
+      "Growth carries TVL two more weeks at its 7-day rate, through the slope, clamped to +/-30%. " +
+      "Seasoning is 1.00: the snapshot cannot confirm an age effect (see the factor check below), so the model does not invent one. " +
+      "Sibling is 0.50 for a watchlist protocol that shares its first word with a traded token, and 1.00 otherwise.</p>" +
       "<h3>Family offsets</h3><table class='build'>" + famRows + "</table>" +
       "<h3>Blind validation</h3><table class='build'>" +
-      "<tr><td>Leave-one-out, median miss</td><td>x" + v.looMedian.toFixed(2) + " vs x" + v.flatMedian.toFixed(2) + " flat</td></tr>" +
-      "<tr><td>Leave-one-out, within 3x of the real cap</td><td>" + pct(v.looWithin3) + " vs " + pct(v.flatWithin3) + " flat</td></tr>" +
+      "<tr><td>Curve alone, leave-one-out</td><td>x" + v.looCurveMedian.toFixed(2) + " · " + pct(v.looCurveWithin3) + " within 3x</td></tr>" +
+      "<tr><td>Curve + family, leave-one-out</td><td>x" + v.looFamMedian.toFixed(2) + " · " + pct(v.looFamWithin3) + " within 3x</td></tr>" +
+      "<tr><td>Curve + family + growth, leave-one-out</td><td>x" + v.looMedian.toFixed(2) + " · " + pct(v.looWithin3) + " within 3x</td></tr>" +
+      "<tr><td>Flat (median mcap/TVL), leave-one-out</td><td>x" + v.flatMedian.toFixed(2) + " · " + pct(v.flatWithin3) + " within 3x</td></tr>" +
       "<tr><td>Time split: fit " + v.timeTrain + " tokens listed before 2024, test " + v.timeTest + " newer</td><td>x" + (v.timeCurveMedian || 0).toFixed(2) + " vs x" + (v.timeFlatMedian || 0).toFixed(2) + " flat</td></tr>" +
       "<tr><td>Time split, within 3x</td><td>" + pct(v.timeCurveWithin3 || 0) + " vs " + pct(v.timeFlatWithin3 || 0) + " flat</td></tr>" +
       "<tr><td>Blind 50% / 80% band</td><td>x" + v.band50.toFixed(2) + " / x" + v.band80.toFixed(2) + "</td></tr>" +
       "<tr><td>Blind range multipliers, P10 / P25 / P75 / P90</td><td>x" + v.p10Mult.toFixed(2) + " / x" + v.p25Mult.toFixed(2) + " / x" + v.p75Mult.toFixed(2) + " / x" + v.p90Mult.toFixed(2) + "</td></tr>" +
-      "</table><p class='fine'>Flat predicts the median mcap/TVL times TVL. The curve beats flat on every blind cut; the band is wide because launches are genuinely uncertain, and the board shows it instead of hiding it.</p>" +
-      "<h3>Farm economics</h3><p>Slice = capital x (implied / TVL) x airdrop share (10% of value, changeable above). Fees = gas on the protocol's chain for fund, deposit, claim ($1.50) and exit ($3.00). T-bill forgone = capital x 4% x 90 / 365. Net = slice − fees − T-bill. FARM when net is over +$2, THIN from −$5 to +$2, SKIP under −$5.</p>" +
-      "<h3>Set aside by house rule</h3><p>" + D.setAsideCount + " protocols never reach the board: category CEX, Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking or Restaked BTC; a name carrying a whole word wrapped, staked or staking; a name ending in a version marker; or a name beginning with an exchange. A wrapped or staked product of a token that already trades is not a token that does not exist yet.</p>" +
-      "<h3>Assumptions and limits</h3><p>A record is not proof: a protocol on the board records no token in DefiLlama, which is not the same as having none. The airdrop share is a working guess, not a promise. Gas is a rough table figure per chain. The curve is fitted to 128 tokens; a launch can miss it by an order of magnitude, which is why every row carries its blind range.</p>";
+      "</table><p class='fine'>Each token is priced by a curve refit without it. The curve beats flat on every blind cut; family alone does not improve the blind miss, growth is what carries the model. The band is wide because launches are genuinely uncertain, and the board shows it instead of hiding it.</p>" +
+      "<h3>Factor check</h3><p>The blind residuals correlate r = " + v.factorCheck.corrDays.toFixed(2) + " with log days without a token and r = " + v.factorCheck.corrGrowth.toFixed(2) + " with 7-day TVL change (" + v.factorCheck.n + " tokens with a listing date). The fitted seasoning slope is " + v.factorCheck.seasonSlope.toFixed(2) + " per decade of days — within noise. Neither an age effect nor a leftover momentum effect is confirmed, so seasoning stays 1.00 and growth is only the two-week carry.</p>" +
+      "<h3>Farm economics</h3><p>Slice = capital x (implied / (TVL + capital)) x airdrop share (10% of value, changeable above). Fees = gas on the cheapest of the protocol's first three chains for fund, deposit, claim ($1.50) and exit ($3.00). T-bill forgone = capital x 4% x 90 / 365. Net = slice − fees − T-bill. FARM when net beats all of it, THIN when the slice beats fees only, SKIP when it does not even beat fees.</p>" +
+      "<h3>Set aside by house rule</h3><p>" + D.setAsideCount + " protocols never reach the board: category CEX, Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking or Restaked BTC; a name carrying a whole word wrapped, staked or staking; a name ending in a version marker; a name beginning with an exchange; or a name sharing its first word with a token that already trades. A wrapped or staked product of a token that already trades is not a token that does not exist yet. " + D.siblingHalf + " watchlist sibling stays on the board at half value.</p>" +
+      "<h3>Assumptions and limits</h3><p>A record is not proof: a protocol on the board records no token in DefiLlama, which is not the same as having none. The airdrop share is a working guess, not a promise. Gas is a rough table figure per chain. The curve is fitted to " + D.curve.n + " tokens; a launch can miss it by an order of magnitude, which is why every row carries its blind range (P10 to P90).</p>";
     $("back-board-2").onclick = function (ev) { ev.preventDefault(); showView("board"); renderBoard(); };
   }
 

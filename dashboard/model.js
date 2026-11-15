@@ -133,9 +133,15 @@
     return row ? row.factor : 1.0;
   }
 
-  function growthFactor(change7d) {
+  // Growth carries TVL two more weeks at its 7-day rate, through the
+  // slope: a fast-growing protocol is worth more than its TVL today, but
+  // the sublinear curve damps the carry. The total carry is clamped to
+  // +/-30%. Returns the TVL multiplier; the value multiplier is mult^b.
+  // Blind-tested: on the 101-token fit set this beats a post-curve
+  // 1 + change multiplier on every cut (see validate).
+  function growthTvlFactor(change7d) {
     if (change7d === null || change7d === undefined) return 1.0;
-    return clamp(1 + change7d / 100, 0.8, 1.3);
+    return clamp(Math.pow(1 + change7d / 100, 2), 0.7, 1.3);
   }
   function ageYears(listedAt) {
     if (!listedAt) return 1.0; // unreported: one year, stated on the page
@@ -144,24 +150,58 @@
     var now = Date.UTC(2026, 10, 14);
     return Math.max(0, (now - then) / 86400000 / 365.25);
   }
-  function seasoningFactor(age) {
-    return clamp(Math.pow(0.95, age), 0.7, 1.0);
+  // Seasoning is 1.00: the snapshot cannot confirm an age effect. The
+  // factor check in validate() regresses the blind residuals on log days
+  // and finds a correlation near zero (r about -0.05), so the model does
+  // not invent one. Age is still shown on every row; it just does not
+  // move the price.
+  function seasoningFactor() { return 1.0; }
+  // First words of the names of every protocol whose token already
+  // trades. A pre-token protocol sharing one is a sibling of that token.
+  function tradedFirstWords(protocols) {
+    var words = {};
+    protocols.forEach(function (p) {
+      if (p.gecko_id === null && p.symbol === null) return;
+      var w = (p.name || "").trim().split(/\s+/)[0];
+      if (w) words[w.toLowerCase()] = true;
+    });
+    return words;
   }
-  // A shared first word is a name, not evidence: no adjustment either way.
-  function siblingFactor() { return 1.0; }
+  function isSibling(p, words) {
+    var w = (p.name || "").trim().split(/\s+/)[0];
+    return w ? !!words[w.toLowerCase()] : false;
+  }
 
-  function priceProtocol(p, curve, famTable) {
+  function priceProtocol(p, curve, famTable, sibling) {
+    var g = growthTvlFactor(p.change_7d);
     var base = Math.pow(10, curve.a + curve.b * log10(p.tvl_usd));
     var fam = familyFactor(famTable, p.category);
-    var growth = growthFactor(p.change_7d);
-    var age = ageYears(p.listed_at);
-    var seas = seasoningFactor(age);
-    var sib = siblingFactor();
+    var growth = Math.pow(g, curve.b);
+    var seas = seasoningFactor();
+    var sib = sibling || 1.0;
     return {
       base: base, family: fam, growth: growth, seasoning: seas,
-      sibling: sib, ageYears: age,
+      sibling: sib, ageYears: ageYears(p.listed_at),
       implied: base * fam * growth * seas * sib,
     };
+  }
+
+  // The curve is fitted to the traded tokens that can stand for a
+  // launch. One point per traded token: listings that share a token are
+  // merged and their TVL summed (no-op on this snapshot: no traded token
+  // is listed twice); bridges and version listings are not standalone
+  // tokens; ratios past 1/500 or 50x are outliers, not a curve; and a
+  // centralised exchange's token is not a protocol launch. Each step is
+  // counted so the method page can state it. Returns "kept" or the
+  // reason the point is dropped.
+  function fitPoint(p) {
+    if (!p.gecko_id || !p.symbol || !p.mcap_usd || p.mcap_usd <= 0 || !p.tvl_usd || p.tvl_usd <= 0) return null;
+    if (p.category === "Bridge" || p.category === "Canonical Bridge") return "bridge";
+    if (VERSION_SUFFIX.test(p.name || "")) return "version";
+    var r = p.mcap_usd / p.tvl_usd;
+    if (r < 1 / 500 || r > 50) return "ratio";
+    if (p.category === "CEX") return "cex";
+    return "kept";
   }
 
   // Why a protocol is set aside: it cannot launch a token of its own.
@@ -177,6 +217,19 @@
   function gasFor(chain) {
     return GAS_USD[chain] !== undefined ? GAS_USD[chain] : 0.5;
   }
+  // The farm plan runs on the cheapest of the protocol's first three
+  // chains: gas is the only chain-dependent cost, and the plan names
+  // the chain it runs on.
+  function cheapestChain(chains) {
+    var list = (chains || []).slice(0, 3);
+    if (list.length === 0) return "Ethereum";
+    var best = list[0], bestGas = gasFor(best), i;
+    for (i = 1; i < list.length; i++) {
+      var g = gasFor(list[i]);
+      if (g < bestGas) { best = list[i]; bestGas = g; }
+    }
+    return best;
+  }
   function methodFor(category) {
     return METHODS[category || ""] || DEFAULT_METHOD;
   }
@@ -187,11 +240,17 @@
   function farmPlan(p, priced, chain) {
     var name = p.name, method = methodFor(p.category).method, verb = methodFor(p.category).verb;
     var gas = gasFor(chain);
-    var slice = SLICE_CAPITAL * (priced.implied / p.tvl_usd) * AIRDROP_SHARE;
+    // The slice is capital / (TVL + capital) of the implied value: the
+    // farm buys a share of the pool it joins, so the capital itself is
+    // part of the denominator. At TVL >> capital this is the old
+    // capital/TVL form; at small TVL it is the honest one.
+    var slice = SLICE_CAPITAL * (priced.implied / (p.tvl_usd + SLICE_CAPITAL)) * AIRDROP_SHARE;
     var fees = gas + gas + CLAIM_USD + EXIT_USD;
     var tbill = SLICE_CAPITAL * TBILL_YEAR * FARM_DAYS / 365;
     var net = slice - fees - tbill;
-    var verdict = net > 2 ? "FARM" : net < -5 ? "SKIP" : "THIN";
+    // FARM beats all of it (slice covers fees and the T-bill forgone);
+    // THIN beats fees only; SKIP does not even beat fees.
+    var verdict = net > 0 ? "FARM" : (slice - fees > 0 ? "THIN" : "SKIP");
     var steps = [
       "Fund. Open a fresh wallet on " + chain + " with $1,000 of USDC and some gas, so the position is easy to track. Cost $" + gas.toFixed(2) + ", about 5 minutes.",
       "Verify. Reach " + name + " from its DefiLlama listing, not a search ad. Check the contracts, the audits and whether a points page exists. No cost, about 15 minutes.",
@@ -212,26 +271,68 @@
   // token being predicted; the time split fits only tokens listed before
   // 2024 and tests the newer ones. The flat baseline predicts the median
   // mcap/TVL times TVL. Miss factor is max(pred/actual, actual/pred).
+  // Three model variants are left out in turn (curve alone, curve +
+  // family, curve + family + growth) so the page can show what each
+  // ingredient adds. The factor check regresses the full-model blind
+  // residuals on log days without a token and on 7-day TVL change: a
+  // correlation near zero means the snapshot cannot confirm that effect,
+  // which is why seasoning is 1.00.
   function validate(traded) {
-    var pts = traded.map(function (p) { return { tvl: p.tvl_usd, mcap: p.mcap_usd, category: p.category || "(none)", listed_at: p.listed_at }; });
+    function corr(xs, ys) {
+      var n = xs.length, mx = 0, my = 0, i, sxy = 0, sxx = 0, syy = 0;
+      if (n < 10) return 0;
+      for (i = 0; i < n; i++) { mx += xs[i]; my += ys[i]; }
+      mx /= n; my /= n;
+      for (i = 0; i < n; i++) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) * (xs[i] - mx); syy += (ys[i] - my) * (ys[i] - my); }
+      return sxx && syy ? sxy / Math.sqrt(sxx * syy) : 0;
+    }
+    function linSlope(xs, ys) {
+      var n = xs.length, mx = 0, my = 0, i, sxy = 0, sxx = 0;
+      if (n < 10) return 0;
+      for (i = 0; i < n; i++) { mx += xs[i]; my += ys[i]; }
+      mx /= n; my /= n;
+      for (i = 0; i < n; i++) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) * (xs[i] - mx); }
+      return sxx ? sxy / sxx : 0;
+    }
+    function within3(arr) {
+      var c = 0, k;
+      for (k = 0; k < arr.length; k++) if (arr[k] <= 3) c++;
+      return arr.length ? c / arr.length : 0;
+    }
+    var pts = traded.map(function (p) { return { tvl: p.tvl_usd, mcap: p.mcap_usd, category: p.category || "(none)", listed_at: p.listed_at, change_7d: p.change_7d }; });
     var ratios = pts.map(function (q) { return q.mcap / q.tvl; }).sort(function (x, y) { return x - y; });
     var flatRatio = median(ratios);
-    var looMiss = [], looSigned = [], flatMiss = [];
+    var looMiss = [], looFamMiss = [], looCurveMiss = [], looSigned = [], flatMiss = [];
+    var looDays = [], looChange = [], looResid = [], looResidDated = [];
     var i, j, others, curve, fam;
     for (i = 0; i < pts.length; i++) {
       others = [];
       for (j = 0; j < pts.length; j++) if (j !== i) others.push(pts[j]);
       curve = fitCurve(others);
       fam = familyTable(others.map(function (q) { return { tvl: q.tvl, mcap: q.mcap, category: q.category }; }), curve);
-      var pred = Math.pow(10, curve.a + curve.b * log10(pts[i].tvl)) * familyFactor(fam, pts[i].category);
-      looMiss.push(Math.max(pred / pts[i].mcap, pts[i].mcap / pred));
-      looSigned.push(log10(pts[i].mcap / pred));
+      var base = Math.pow(10, curve.a + curve.b * log10(pts[i].tvl));
+      var famPred = base * familyFactor(fam, pts[i].category);
+      var fullPred = famPred * Math.pow(growthTvlFactor(pts[i].change_7d), curve.b);
+      looCurveMiss.push(Math.max(base / pts[i].mcap, pts[i].mcap / base));
+      looFamMiss.push(Math.max(famPred / pts[i].mcap, pts[i].mcap / famPred));
+      looMiss.push(Math.max(fullPred / pts[i].mcap, pts[i].mcap / fullPred));
+      var signed = log10(pts[i].mcap / fullPred);
+      looSigned.push(signed);
+      looResid.push(signed);
+      if (pts[i].listed_at) {
+        var days = ageYears(pts[i].listed_at);
+        looDays.push(log10(Math.max(1, days * 365.25)));
+        looChange.push((pts[i].change_7d || 0) / 100);
+        looResidDated.push(signed);
+      }
       var fp = flatRatio * pts[i].tvl;
       flatMiss.push(Math.max(fp / pts[i].mcap, pts[i].mcap / fp));
     }
     looMiss.sort(function (x, y) { return x - y; });
+    looFamMiss.sort(function (x, y) { return x - y; });
+    looCurveMiss.sort(function (x, y) { return x - y; });
     flatMiss.sort(function (x, y) { return x - y; });
-    looSigned.sort(function (x, y) { return x - y; });
+    var signedSorted = looSigned.slice().sort(function (x, y) { return x - y; });
     var absLog = looMiss.map(function (m) { return log10(m); }).sort(function (x, y) { return x - y; });
     var oldPts = pts.filter(function (q) { return q.listed_at && q.listed_at < "2024-01-01"; });
     var newPts = pts.filter(function (q) { return q.listed_at && q.listed_at >= "2024-01-01"; });
@@ -241,7 +342,7 @@
       var f2 = familyTable(oldPts.map(function (q) { return { tvl: q.tvl, mcap: q.mcap, category: q.category }; }), c2);
       tsCurve = []; tsFlat = [];
       for (i = 0; i < newPts.length; i++) {
-        var pr = Math.pow(10, c2.a + c2.b * log10(newPts[i].tvl)) * familyFactor(f2, newPts[i].category);
+        var pr = Math.pow(10, c2.a + c2.b * log10(newPts[i].tvl)) * familyFactor(f2, newPts[i].category) * Math.pow(growthTvlFactor(newPts[i].change_7d), c2.b);
         tsCurve.push(Math.max(pr / newPts[i].mcap, newPts[i].mcap / pr));
         var fpr = flatRatio * newPts[i].tvl;
         tsFlat.push(Math.max(fpr / newPts[i].mcap, newPts[i].mcap / fpr));
@@ -249,27 +350,30 @@
       tsCurve.sort(function (x, y) { return x - y; });
       tsFlat.sort(function (x, y) { return x - y; });
     }
-    function within3(arr) {
-      var c = 0, k;
-      for (k = 0; k < arr.length; k++) if (arr[k] <= 3) c++;
-      return arr.length ? c / arr.length : 0;
-    }
     return {
       n: pts.length,
       looMedian: median(looMiss), flatMedian: median(flatMiss),
       looWithin3: within3(looMiss), flatWithin3: within3(flatMiss),
+      looCurveMedian: median(looCurveMiss), looCurveWithin3: within3(looCurveMiss),
+      looFamMedian: median(looFamMiss), looFamWithin3: within3(looFamMiss),
       band50: Math.pow(10, quantile(absLog, 0.5)),
       band80: Math.pow(10, quantile(absLog, 0.8)),
-      p10Mult: Math.pow(10, quantile(looSigned, 0.1)),
-      p25Mult: Math.pow(10, quantile(looSigned, 0.25)),
-      p50Mult: Math.pow(10, quantile(looSigned, 0.5)),
-      p75Mult: Math.pow(10, quantile(looSigned, 0.75)),
-      p90Mult: Math.pow(10, quantile(looSigned, 0.9)),
+      p10Mult: Math.pow(10, quantile(signedSorted, 0.1)),
+      p25Mult: Math.pow(10, quantile(signedSorted, 0.25)),
+      p50Mult: Math.pow(10, quantile(signedSorted, 0.5)),
+      p75Mult: Math.pow(10, quantile(signedSorted, 0.75)),
+      p90Mult: Math.pow(10, quantile(signedSorted, 0.9)),
       timeTrain: oldPts.length, timeTest: newPts.length,
       timeCurveMedian: tsCurve ? median(tsCurve) : null,
       timeFlatMedian: tsFlat ? median(tsFlat) : null,
       timeCurveWithin3: tsCurve ? within3(tsCurve) : null,
       timeFlatWithin3: tsFlat ? within3(tsFlat) : null,
+      factorCheck: {
+        n: looDays.length,
+        corrDays: corr(looDays, looResidDated),
+        corrGrowth: corr(looChange, looResidDated),
+        seasonSlope: linSlope(looDays, looResidDated),
+      },
     };
   }
 
@@ -279,25 +383,43 @@
     var watchlist = snapshot.watchlist || [];
     var watchSet = {};
     watchlist.forEach(function (s) { watchSet[s] = true; });
-    var traded = protocols.filter(function (p) {
-      return p.gecko_id !== null && p.symbol !== null && p.mcap_usd && p.mcap_usd > 0 && p.tvl_usd > 0;
+    var fitCounts = { from: 0, bridge: 0, version: 0, ratio: 0, cex: 0, kept: 0 };
+    var traded = [];
+    protocols.forEach(function (p) {
+      var fr = fitPoint(p);
+      if (fr === null) return;
+      fitCounts.from++;
+      if (fr === "kept") { fitCounts.kept++; traded.push(p); }
+      else fitCounts[fr]++;
     });
     var preToken = protocols.filter(function (p) { return p.gecko_id === null && p.symbol === null; });
     var withToken = protocols.filter(function (p) { return p.gecko_id !== null || p.symbol !== null; });
     var curve = fitCurve(traded.map(function (p) { return { tvl: p.tvl_usd, mcap: p.mcap_usd }; }));
     var fam = familyTable(traded.map(function (p) { return { tvl: p.tvl_usd, mcap: p.mcap_usd, category: p.category || "(none)" }; }), curve);
     var validation = validate(traded);
+    var siblingWords = tradedFirstWords(protocols);
+    var siblingHalf = 0;
     var setAside = [];
     var rows = [];
     var i, p, reason, priced, plan;
     for (i = 0; i < preToken.length; i++) {
       p = preToken[i];
       reason = setAsideReason(p);
+      if (!reason && isSibling(p, siblingWords)) {
+        // A sibling of a token that already trades cannot launch its own
+        // token — except a watchlist sibling, which stays at half value.
+        if (watchSet[p.slug]) reason = null;
+        else reason = "shares a first word with a token that already trades";
+      }
       if (reason) { setAside.push({ slug: p.slug, name: p.name, tvl_usd: p.tvl_usd, category: p.category, chains: p.chains, reason: reason }); continue; }
-      priced = priceProtocol(p, curve, fam);
-      plan = farmPlan(p, priced, (p.chains && p.chains[0]) || "Ethereum");
+      var sib = isSibling(p, siblingWords) ? 0.5 : 1.0;
+      if (sib === 0.5) siblingHalf++;
+      priced = priceProtocol(p, curve, fam, sib);
+      var farmChain = cheapestChain(p.chains);
+      plan = farmPlan(p, priced, farmChain);
       rows.push({
         slug: p.slug, name: p.name, category: p.category, chains: p.chains,
+        farm_chain: farmChain,
         tvl_usd: p.tvl_usd, change_7d: p.change_7d, listed_at: p.listed_at,
         watchlist: !!watchSet[p.slug],
         implied_value_usd: Math.round(priced.implied),
@@ -342,6 +464,8 @@
       watchlistCount: watchlist.length,
       watchlistCovered: rows.filter(function (r) { return r.watchlist; }).length,
       setAsideCount: setAside.length,
+      siblingHalf: siblingHalf,
+      fitSet: fitCounts,
       curve: { a: curve.a, b: curve.b, n: curve.n, per100m: Math.pow(10, curve.a + curve.b * 8) },
       families: famList,
       validation: validation,
@@ -360,10 +484,12 @@
 
   var api = {
     AS_OF: AS_OF, fitCurve: fitCurve, familyTable: familyTable,
-    familyFactor: familyFactor, growthFactor: growthFactor,
+    familyFactor: familyFactor, growthTvlFactor: growthTvlFactor,
     ageYears: ageYears, seasoningFactor: seasoningFactor,
-    siblingFactor: siblingFactor, priceProtocol: priceProtocol,
-    setAsideReason: setAsideReason, gasFor: gasFor, methodFor: methodFor,
+    tradedFirstWords: tradedFirstWords, isSibling: isSibling,
+    fitPoint: fitPoint, priceProtocol: priceProtocol,
+    setAsideReason: setAsideReason, gasFor: gasFor, cheapestChain: cheapestChain,
+    methodFor: methodFor,
     farmPlan: farmPlan, validate: validate, buildBoard: buildBoard,
     fmtMoney: fmtMoney, fmtSigned: fmtSigned,
     SLICE_CAPITAL: SLICE_CAPITAL, AIRDROP_SHARE: AIRDROP_SHARE,
