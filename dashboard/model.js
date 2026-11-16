@@ -9,10 +9,10 @@
   "use strict";
 
   var AS_OF = "2026-11-14";
-  var TBILL_YEAR = 0.04; // 4% a year forgone while capital sits in a farm
-  var FARM_DAYS = 90;
+  var TBILL_YEAR = 0.04; // 4% a year forgone while capital sits idle in a farm
+  var FARM_DAYS = 42; // six weeks: a typical points-season window
   var AIRDROP_SHARE = 0.1; // a 10% drop, pro rata to TVL, is the working guess
-  var SLICE_CAPITAL = 1000;
+  var SLICE_CAPITAL = 5000; // a farm has to be this big for the slice to cover its costs (see Method)
 
   // Categories that cannot launch a token of their own: a centralised
   // exchange, a wrapped / staked / bridged product of a token that already
@@ -82,6 +82,32 @@
     var lo = Math.floor(pos), hi = Math.ceil(pos);
     if (lo === hi) return sorted[lo];
     return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+  }
+  function meanOf(xs) {
+    var s = 0, i;
+    for (i = 0; i < xs.length; i++) s += xs[i];
+    return xs.length ? s / xs.length : 0;
+  }
+  // Spearman rank correlation, ties averaged. Used on out-of-fold
+  // predictions, so it says whether the model ranks launches, not just
+  // whether its point values are close.
+  function spearman(xs, ys) {
+    function ranks(arr) {
+      var idx = arr.map(function (v, i) { return [v, i]; }).sort(function (a, b) { return a[0] - b[0]; });
+      var r = new Array(arr.length), i = 0;
+      while (i < idx.length) {
+        var j = i;
+        while (j + 1 < idx.length && idx[j + 1][0] === idx[i][0]) j++;
+        var avg = (i + j) / 2 + 1, k;
+        for (k = i; k <= j; k++) r[idx[k][1]] = avg;
+        i = j + 1;
+      }
+      return r;
+    }
+    var rx = ranks(xs), ry = ranks(ys), n = xs.length;
+    var mx = meanOf(rx), my = meanOf(ry), sxy = 0, sxx = 0, syy = 0, i;
+    for (i = 0; i < n; i++) { sxy += (rx[i] - mx) * (ry[i] - my); sxx += (rx[i] - mx) * (rx[i] - mx); syy += (ry[i] - my) * (ry[i] - my); }
+    return sxx && syy ? sxy / Math.sqrt(sxx * syy) : 0;
   }
   function fmtMoney(x) {
     if (x >= 1e9) return "$" + (x / 1e9).toFixed(2) + "B";
@@ -204,6 +230,17 @@
     return "kept";
   }
 
+  // A protocol whose first word is one of its own chains is the chain's
+  // own product: its token, if any, is the chain's token, not a new launch.
+  function isNamedForChain(p) {
+    var first = (p.name || "").trim().split(/\s+/)[0];
+    if (!first) return false;
+    first = first.toLowerCase();
+    var chains = p.chains || [], i;
+    for (i = 0; i < chains.length; i++) if ((chains[i] || "").toLowerCase() === first) return true;
+    return false;
+  }
+
   // Why a protocol is set aside: it cannot launch a token of its own.
   // Returns a short reason, or null when the protocol stays on the board.
   function setAsideReason(p) {
@@ -211,6 +248,7 @@
     if (WRAPPED_WORD.test(p.name)) return "name carries wrapped / staked";
     if (VERSION_SUFFIX.test(p.name)) return "name ends in a version marker";
     if (EXCHANGE_PREFIX.test(p.name)) return "name begins with an exchange";
+    if (isNamedForChain(p)) return "named for its chain";
     return null;
   }
 
@@ -234,9 +272,16 @@
     return METHODS[category || ""] || DEFAULT_METHOD;
   }
 
-  // Seven concrete steps for one protocol, each 20-600 characters once
+  // Ten dated steps for one protocol, each 20-600 characters once
   // trimmed, naming the protocol, its chain and its method, with a dollar
-  // cost and minutes on every step that has one.
+  // cost and minutes on every step that has one. The plan runs 42 days:
+  // fund and verify on day 0, deposit on day 3, a weekly check, a mid-way
+  // re-read on day 21, claim and exit on day 42, and a stop rule that
+  // fires any day the TVL closes 10% under today's level.
+  // The verdict is break-even odds: the launch probability the farm needs
+  // to cover its costs. Worth farming at 10% or better (pays if 1 hold in
+  // 10 sees a launch), marginal at 25% or better, else skip; a 7-day TVL
+  // fall past -30% caps the verdict at marginal.
   function farmPlan(p, priced, chain) {
     var name = p.name, method = methodFor(p.category).method, verb = methodFor(p.category).verb;
     var gas = gasFor(chain);
@@ -245,25 +290,34 @@
     // part of the denominator. At TVL >> capital this is the old
     // capital/TVL form; at small TVL it is the honest one.
     var slice = SLICE_CAPITAL * (priced.implied / (p.tvl_usd + SLICE_CAPITAL)) * AIRDROP_SHARE;
-    var fees = gas + gas + CLAIM_USD + EXIT_USD;
+    var fees = gas + gas + gas + CLAIM_USD + EXIT_USD;
     var tbill = SLICE_CAPITAL * TBILL_YEAR * FARM_DAYS / 365;
     var net = slice - fees - tbill;
-    // FARM beats all of it (slice covers fees and the T-bill forgone);
-    // THIN beats fees only; SKIP does not even beat fees.
-    var verdict = net > 0 ? "FARM" : (slice - fees > 0 ? "THIN" : "SKIP");
+    var odds = (fees + tbill) / slice;
+    var verdict = odds <= 0.10 ? "Worth farming" : (odds <= 0.25 ? "Marginal" : "Skip");
+    if (verdict === "Worth farming" && p.change_7d !== null && p.change_7d !== undefined && p.change_7d < -30) verdict = "Marginal";
+    var stop = p.tvl_usd * 0.9;
     var steps = [
-      "Fund. Open a fresh wallet on " + chain + " with $1,000 of USDC and some gas, so the position is easy to track. Cost $" + gas.toFixed(2) + ", about 5 minutes.",
+      "Fund. Open a fresh wallet on " + chain + " with $5,000 of USDC and some gas, so the position is easy to track. Cost $" + gas.toFixed(2) + ", about 5 minutes.",
       "Verify. Reach " + name + " from its DefiLlama listing, not a search ad. Check the contracts, the audits and whether a points page exists. No cost, about 15 minutes.",
-      "Deposit. " + verb + " on " + chain + " with $1,000 of USDC, then stake it into the " + method + ". Check the redemption queue first. Cost $" + gas.toFixed(2) + ", about 15 minutes.",
-      "Upkeep. Every week for 13 weeks, check the points page and the position in about 5 minutes. No cost, about 65 minutes in all.",
-      "Risk. Redeem if funding stays negative for a week or the backing report shows less than 100 percent. No cost, about 5 minutes.",
+      "Deposit. " + verb + " on " + chain + " with $5,000 of USDC, then stake it into the " + method + ". Check the redemption queue first. Cost $" + gas.toFixed(2) + ", about 15 minutes.",
+      "Check. On day 4, confirm the position shows in " + name + "'s app and log the transaction hash, date and amount. No cost, about 5 minutes.",
+      "Upkeep. Once a week for 6 weeks, check the points page and the position in about 5 minutes. No cost, about 30 minutes in all.",
+      "Mid-way. On day 21, re-read the rewards page and do any qualifying action it names once, only if it ends by day 42. Cost $0.05, about 10 minutes.",
+      "Stop rule. Any day the TVL closes under " + fmtMoney(stop) + " (10% under today's level) or withdrawals pause, withdraw at once and end the plan. Cost $" + gas.toFixed(2) + ", about 15 minutes.",
       "Claim. If a token launches, claim only from the official app. At this implied value a 10 percent drop pro rata to TVL pays this position about " + fmtMoney(slice) + ". Cost $" + CLAIM_USD.toFixed(2) + ", about 10 minutes.",
-      "Exit. Withdraw after " + FARM_DAYS + " days or the claim. Idle dollars here forgo 4 percent a year in T-bills. Cost $" + EXIT_USD.toFixed(2) + ", about 10 minutes.",
+      "Exit. Withdraw after " + FARM_DAYS + " days or the claim, and move the $5,000 back. Idle dollars here forgo 4 percent a year in T-bills. Cost $" + EXIT_USD.toFixed(2) + ", about 10 minutes.",
+      "Close out. Log the outcome, the net and whether the farm beat a T-bill at this size, so the next farm starts from a record, not a guess. No cost, about 5 minutes.",
     ];
+    var when = ["Day 0", "Day 0", "Day 3", "Day 4", "Weekly ×6", "Day 21", "Any day", "Day 42", "Day 42", "Day 42"];
+    var minutes = [5, 15, 15, 5, 30, 10, 15, 10, 10, 5];
+    var minutesTotal = 0, i;
+    for (i = 0; i < minutes.length; i++) minutesTotal += minutes[i];
     return {
-      steps: steps, slice: slice, fees: fees, tbill: tbill, net: net,
-      verdict: verdict, method: method,
-      costTotal: fees, minutesTotal: 5 + 15 + 15 + 65 + 5 + 10 + 10,
+      steps: steps, stepWhen: when, slice: slice, fees: fees, tbill: tbill, net: net,
+      odds: odds, verdict: verdict, method: method,
+      netPerHour: net / (minutesTotal / 60),
+      costTotal: fees, minutesTotal: minutesTotal,
     };
   }
 
@@ -299,10 +353,10 @@
       for (k = 0; k < arr.length; k++) if (arr[k] <= 3) c++;
       return arr.length ? c / arr.length : 0;
     }
-    var pts = traded.map(function (p) { return { tvl: p.tvl_usd, mcap: p.mcap_usd, category: p.category || "(none)", listed_at: p.listed_at, change_7d: p.change_7d }; });
-    var ratios = pts.map(function (q) { return q.mcap / q.tvl; }).sort(function (x, y) { return x - y; });
-    var flatRatio = median(ratios);
+    var pts = traded.map(function (p) { return { tvl: p.tvl_usd, mcap: p.mcap_usd, category: p.category || "(none)", listed_at: p.listed_at, change_7d: p.change_7d, slug: p.slug }; });
     var looMiss = [], looFamMiss = [], looCurveMiss = [], looSigned = [], flatMiss = [];
+    var looCurvePred = [], looCurveAct = [], looFamPred = [], looFamAct = [];
+    var looPred = [], looAct = [], flatPred = [], flatAct = [];
     var looDays = [], looChange = [], looResid = [], looResidDated = [];
     var i, j, others, curve, fam;
     for (i = 0; i < pts.length; i++) {
@@ -316,6 +370,9 @@
       looCurveMiss.push(Math.max(base / pts[i].mcap, pts[i].mcap / base));
       looFamMiss.push(Math.max(famPred / pts[i].mcap, pts[i].mcap / famPred));
       looMiss.push(Math.max(fullPred / pts[i].mcap, pts[i].mcap / fullPred));
+      looCurvePred.push(base); looCurveAct.push(pts[i].mcap);
+      looFamPred.push(famPred); looFamAct.push(pts[i].mcap);
+      looPred.push(fullPred); looAct.push(pts[i].mcap);
       var signed = log10(pts[i].mcap / fullPred);
       looSigned.push(signed);
       looResid.push(signed);
@@ -325,8 +382,12 @@
         looChange.push((pts[i].change_7d || 0) / 100);
         looResidDated.push(signed);
       }
-      var fp = flatRatio * pts[i].tvl;
+      // The flat baseline is leave-one-out too: the median multiple of
+      // every token except the one being priced.
+      var flatOthers = others.map(function (q) { return q.mcap / q.tvl; }).sort(function (x, y) { return x - y; });
+      var fp = median(flatOthers) * pts[i].tvl;
       flatMiss.push(Math.max(fp / pts[i].mcap, pts[i].mcap / fp));
+      flatPred.push(fp); flatAct.push(pts[i].mcap);
     }
     looMiss.sort(function (x, y) { return x - y; });
     looFamMiss.sort(function (x, y) { return x - y; });
@@ -340,15 +401,54 @@
     if (oldPts.length > 0 && newPts.length > 0) {
       var c2 = fitCurve(oldPts);
       var f2 = familyTable(oldPts.map(function (q) { return { tvl: q.tvl, mcap: q.mcap, category: q.category }; }), c2);
+      var flatTrain = oldPts.map(function (q) { return q.mcap / q.tvl; }).sort(function (x, y) { return x - y; });
       tsCurve = []; tsFlat = [];
       for (i = 0; i < newPts.length; i++) {
         var pr = Math.pow(10, c2.a + c2.b * log10(newPts[i].tvl)) * familyFactor(f2, newPts[i].category) * Math.pow(growthTvlFactor(newPts[i].change_7d), c2.b);
         tsCurve.push(Math.max(pr / newPts[i].mcap, newPts[i].mcap / pr));
-        var fpr = flatRatio * newPts[i].tvl;
+        var fpr = median(flatTrain) * newPts[i].tvl;
         tsFlat.push(Math.max(fpr / newPts[i].mcap, newPts[i].mcap / fpr));
       }
       tsCurve.sort(function (x, y) { return x - y; });
       tsFlat.sort(function (x, y) { return x - y; });
+    }
+    // Eight held-out folds: traded tokens sorted by slug, fold = index % 8.
+    // Each fold is priced by a model fitted to the other seven; the
+    // predictions are pooled, so every number below is out-of-fold.
+    var eightFold = {};
+    (function () {
+      var bySlug = pts.slice().sort(function (a, b) { return a.slug < b.slug ? -1 : 1; });
+      function predict(variant, train, p) {
+        var c = fitCurve(train);
+        if (variant === "flat") {
+          var ratios = train.map(function (q) { return q.mcap / q.tvl; }).sort(function (x, y) { return x - y; });
+          return median(ratios) * p.tvl;
+        }
+        var pr = Math.pow(10, c.a + c.b * log10(p.tvl));
+        if (variant === "curve") return pr;
+        var fm = familyTable(train.map(function (q) { return { tvl: q.tvl, mcap: q.mcap, category: q.category }; }), c);
+        pr *= familyFactor(fm, p.category);
+        if (variant === "curve+family") return pr;
+        return pr * Math.pow(growthTvlFactor(p.change_7d), c.b);
+      }
+      ["flat", "curve", "curve+family", "curve+family+growth"].forEach(function (variant) {
+        var pred = [], act = [], f;
+        for (f = 0; f < 8; f++) {
+          var test = bySlug.filter(function (_, i) { return i % 8 === f; });
+          var train = bySlug.filter(function (_, i) { return i % 8 !== f; });
+          test.forEach(function (p) { pred.push(predict(variant, train, p)); act.push(p.mcap); });
+        }
+        var miss = pred.map(function (pr, i) { return Math.max(pr / act[i], act[i] / pr); });
+        miss.sort(function (x, y) { return x - y; });
+        var abslog = pred.map(function (pr, i) { return Math.abs(log10(act[i] / pr)); });
+        eightFold[variant] = {
+          median: median(miss), meanAbsLog: meanOf(abslog),
+          within3: within3(miss), spearman: spearman(pred, act),
+        };
+      });
+    })();
+    function meanAbsLogOf(miss) {
+      return meanOf(miss.map(function (m) { return log10(m); }));
     }
     return {
       n: pts.length,
@@ -356,6 +456,11 @@
       looWithin3: within3(looMiss), flatWithin3: within3(flatMiss),
       looCurveMedian: median(looCurveMiss), looCurveWithin3: within3(looCurveMiss),
       looFamMedian: median(looFamMiss), looFamWithin3: within3(looFamMiss),
+      looMeanAbsLog: meanAbsLogOf(looMiss), flatMeanAbsLog: meanAbsLogOf(flatMiss),
+      looCurveMeanAbsLog: meanAbsLogOf(looCurveMiss), looFamMeanAbsLog: meanAbsLogOf(looFamMiss),
+      looSpearman: spearman(looPred, looAct), flatSpearman: spearman(flatPred, flatAct),
+      looCurveSpearman: spearman(looCurvePred, looCurveAct), looFamSpearman: spearman(looFamPred, looFamAct),
+      eightFold: eightFold,
       band50: Math.pow(10, quantile(absLog, 0.5)),
       band80: Math.pow(10, quantile(absLog, 0.8)),
       p10Mult: Math.pow(10, quantile(signedSorted, 0.1)),
@@ -375,6 +480,31 @@
         seasonSlope: linSlope(looDays, looResidDated),
       },
     };
+  }
+
+  // Strict fit vs keep-everything fit, both leave-one-out on the same
+  // full variant. The strict fit drops bridges, version listings, ratio
+  // outliers and CEX tokens; the comparison says whether that earns its
+  // place or just shrinks the sample.
+  function compareFitSets(protocols) {
+    function looMedianMean(set) {
+      var miss = [], i, j, others, curve, fam, pred;
+      for (i = 0; i < set.length; i++) {
+        others = [];
+        for (j = 0; j < set.length; j++) if (j !== i) others.push(set[j]);
+        curve = fitCurve(others.map(function (q) { return { tvl: q.tvl_usd, mcap: q.mcap_usd }; }));
+        fam = familyTable(others.map(function (q) { return { tvl: q.tvl_usd, mcap: q.mcap_usd, category: q.category || "(none)" }; }), curve);
+        pred = Math.pow(10, curve.a + curve.b * log10(set[i].tvl_usd)) * familyFactor(fam, set[i].category) * Math.pow(growthTvlFactor(set[i].change_7d), curve.b);
+        miss.push(Math.max(pred / set[i].mcap_usd, set[i].mcap_usd / pred));
+      }
+      miss.sort(function (x, y) { return x - y; });
+      return { n: set.length, median: median(miss), meanAbsLog: meanOf(miss.map(function (m) { return log10(m); })) };
+    }
+    var strict = protocols.filter(function (p) { return fitPoint(p) === "kept"; });
+    var all = protocols.filter(function (p) {
+      return p.gecko_id && p.symbol && p.mcap_usd > 0 && p.tvl_usd > 0;
+    });
+    return { strict: looMedianMean(strict), keepAll: looMedianMean(all) };
   }
 
   // Full build from a parsed snapshot object.
@@ -397,6 +527,7 @@
     var curve = fitCurve(traded.map(function (p) { return { tvl: p.tvl_usd, mcap: p.mcap_usd }; }));
     var fam = familyTable(traded.map(function (p) { return { tvl: p.tvl_usd, mcap: p.mcap_usd, category: p.category || "(none)" }; }), curve);
     var validation = validate(traded);
+    validation.fitSet = compareFitSets(protocols);
     var siblingWords = tradedFirstWords(protocols);
     var siblingHalf = 0;
     var setAside = [];
@@ -405,6 +536,9 @@
     for (i = 0; i < preToken.length; i++) {
       p = preToken[i];
       reason = setAsideReason(p);
+      // The watchlist is never set aside for its name: a watchlist
+      // protocol named for its chain stays, like a watchlist sibling.
+      if (reason === "named for its chain" && watchSet[p.slug]) reason = null;
       if (!reason && isSibling(p, siblingWords)) {
         // A sibling of a token that already trades cannot launch its own
         // token — except a watchlist sibling, which stays at half value.
@@ -432,8 +566,9 @@
         p90_usd: Math.round(priced.implied * validation.p90Mult),
         slice_usd: plan.slice, fees_usd: plan.fees, tbill_usd: plan.tbill,
         net_usd: plan.net, verdict: plan.verdict, farm_method: plan.method,
+        break_even_odds: plan.odds, net_per_hour_usd: plan.netPerHour,
         farm_cost_usd: plan.costTotal, farm_minutes: plan.minutesTotal,
-        farm_steps: plan.steps,
+        farm_steps: plan.steps, farm_step_when: plan.stepWhen,
       });
     }
     rows.sort(function (x, y) {
@@ -449,13 +584,18 @@
     var boardPoints = rows.map(function (r) { return { tvl: r.tvl_usd, implied: r.implied_value_usd }; });
     var farmCount = 0, thinCount = 0, skipCount = 0;
     for (i = 0; i < rows.length; i++) {
-      if (rows[i].verdict === "FARM") farmCount++;
-      else if (rows[i].verdict === "THIN") thinCount++;
+      if (rows[i].verdict === "Worth farming") farmCount++;
+      else if (rows[i].verdict === "Marginal") thinCount++;
       else skipCount++;
     }
     var famList = [];
     for (var cat in fam) famList.push({ category: cat, factor: fam[cat].factor, n: fam[cat].n });
     famList.sort(function (x, y) { return y.factor - x.factor; });
+    var setAsideByReason = {};
+    setAside.forEach(function (s) { setAsideByReason[s.reason] = (setAsideByReason[s.reason] || 0) + 1; });
+    var bestNetPerHour = rows.filter(function (r) { return r.watchlist; }).slice()
+      .sort(function (a, b) { return b.net_per_hour_usd - a.net_per_hour_usd; }).slice(0, 3)
+      .map(function (r) { return { name: r.name, netPerHour: r.net_per_hour_usd, net: r.net_usd }; });
     return {
       asOf: snapshot.as_of || AS_OF,
       totalProtocols: protocols.length,
@@ -473,6 +613,8 @@
       rows: rows,
       tradedRows: tradedRows,
       setAside: setAside,
+      setAsideByReason: setAsideByReason,
+      bestNetPerHour: bestNetPerHour,
       curvePoints: curvePoints,
       boardPoints: boardPoints,
       sliceCapital: SLICE_CAPITAL,
@@ -487,10 +629,10 @@
     familyFactor: familyFactor, growthTvlFactor: growthTvlFactor,
     ageYears: ageYears, seasoningFactor: seasoningFactor,
     tradedFirstWords: tradedFirstWords, isSibling: isSibling,
-    fitPoint: fitPoint, priceProtocol: priceProtocol,
+    isNamedForChain: isNamedForChain, fitPoint: fitPoint, priceProtocol: priceProtocol,
     setAsideReason: setAsideReason, gasFor: gasFor, cheapestChain: cheapestChain,
-    methodFor: methodFor,
-    farmPlan: farmPlan, validate: validate, buildBoard: buildBoard,
+    methodFor: methodFor, meanOf: meanOf, spearman: spearman,
+    farmPlan: farmPlan, validate: validate, compareFitSets: compareFitSets, buildBoard: buildBoard,
     fmtMoney: fmtMoney, fmtSigned: fmtSigned,
     SLICE_CAPITAL: SLICE_CAPITAL, AIRDROP_SHARE: AIRDROP_SHARE,
     TBILL_YEAR: TBILL_YEAR, FARM_DAYS: FARM_DAYS,

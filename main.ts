@@ -164,7 +164,8 @@ function main(): void {
   mkdirSync(outDir, { recursive: true });
   const board = { as_of: built.asOf, model: "launch-radar: comps-fitted size curve, blind-tested", rows: built.rows };
   writeFileSync(join(outDir, "board.json"), JSON.stringify(board, null, 2) + "\n");
-  const dataScript = "window.RADAR_DATA = " + JSON.stringify(built) + ";\n";
+  const dataScript = "window.RADAR_DATA = " + JSON.stringify(built) + ";\n" +
+    "window.RADAR_SNAPSHOT = " + JSON.stringify(snapshot) + ";\n";
   writeFileSync(join(outDir, "data.js"), dataScript);
   cpSync(join(root, "dashboard"), join(outDir, "dashboard"), { recursive: true });
   const shotSrc = join(root, "screenshots");
@@ -185,7 +186,7 @@ function main(): void {
       `${join(outDir, "screenshots")} (${readdirSync(join(outDir, "screenshots")).length} images)` +
       (stage ? " [staged, no dossier]" : " and dossier.json") +
       `\nboard: ${built.rows.length} rows, watchlist ${built.watchlistCovered}/${built.watchlistCount}, ` +
-      `set aside ${built.setAsideCount}, FARM ${built.counts.farm} / THIN ${built.counts.thin} / SKIP ${built.counts.skip}` +
+      `set aside ${built.setAsideCount}, Worth farming ${built.counts.farm} / Marginal ${built.counts.thin} / Skip ${built.counts.skip}` +
       `\ncurve: log10(mcap) = ${built.curve.a.toFixed(4)} + ${built.curve.b.toFixed(4)}*log10(TVL), n=${built.curve.n}` +
       `\nvalidation: leave-one-out median miss x${built.validation.looMedian.toFixed(2)} vs flat x${built.validation.flatMedian.toFixed(2)}` +
       `, within 3x ${(100 * built.validation.looWithin3).toFixed(1)}% vs ${(100 * built.validation.flatWithin3).toFixed(1)}%` +
