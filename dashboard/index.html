@@ -30,6 +30,7 @@
         <div class="formula" id="formula"></div>
         <table class="kv" id="validation-mini"></table>
         <p class="fine" id="best-net"></p>
+        <p class="fine" id="verify-line"></p>
       </div>
       <div class="panel">
         <h2>Traded tokens and the curve</h2>
@@ -45,21 +46,24 @@
     <label>Search <input id="f-search" type="text" placeholder="name, category or chain"></label>
     <label>Category <select id="f-cat"></select></label>
     <label>Chain <select id="f-chain"></select></label>
-    <label>Verdict <select id="f-verdict"><option value="">All</option><option>FARM</option><option>THIN</option><option>SKIP</option></select></label>
+    <label>Verdict <select id="f-verdict"><option value="">All</option><option>Worth farming</option><option>Marginal</option><option>Skip</option></select></label>
+    <label class="check"><input type="checkbox" id="f-wl"> Watchlist only</label>
     <label>Min TVL <select id="f-tvlf"><option value="0">Any</option><option value="10000000">$10M</option><option value="50000000">$50M</option><option value="100000000">$100M</option><option value="500000000">$500M</option><option value="1000000000">$1B</option></select></label>
-    <label>Capital <select id="f-cap"><option value="1000">$1.0K</option><option value="10000">$10K</option><option value="100000">$100K</option></select></label>
+    <label>Capital <select id="f-cap"><option value="1000">$1.0K</option><option value="5000">$5.0K</option><option value="10000">$10K</option><option value="100000">$100K</option></select></label>
     <label>Airdrop share <select id="f-share"><option value="0.1">10% of value</option><option value="0.05">5% of value</option><option value="0.2">20% of value</option></select></label>
     <span class="shown" id="shown"></span>
     <button id="f-reset" type="button">Reset</button>
   </section>
+  <div class="chips" id="chips"></div>
 
   <section class="boardwrap">
     <table class="board" id="board">
       <thead><tr>
-        <th data-sort="rank">#</th><th data-sort="name">Protocol</th><th data-sort="tvl">TVL</th>
+        <th data-sort="rank">#</th><th data-sort="name">Protocol</th>
+        <th data-sort="implied">Implied value · P10 to P90</th><th data-sort="tvl">TVL</th>
         <th data-sort="change">7D</th><th data-sort="age">No token for</th>
-        <th data-sort="implied">Implied value · P10 to P90</th><th data-sort="slice">$1.0K slice</th>
-        <th data-sort="net">Net of all costs</th><th>Farm · fees · hold</th>
+        <th data-sort="odds">Break-even odds</th><th data-sort="nph">Net if launch $/hour</th>
+        <th>Farm verdict</th><th>Farm · fees · hold</th>
       </tr></thead>
       <tbody id="board-body"></tbody>
     </table>
