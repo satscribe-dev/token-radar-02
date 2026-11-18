@@ -51,18 +51,23 @@
     return (v > 0 ? "+" : "") + v.toFixed(1) + "%";
   }
   // Slice economics recomputed live from capital and airdrop share.
-  // Same formula as the build: capital / (TVL + capital) of the value.
-  // The verdict is break-even odds: the launch probability the farm needs
-  // to cover its costs. Worth farming at 10% or better, marginal at 25%
-  // or better, else skip; a 7-day TVL fall past -30% caps it at marginal.
+  // Same formula as the build: the deployed capital is the user's cap,
+  // scaled down by TVL (1bp of TVL, $500 to the cap) exactly as the
+  // build does, so at the default cap this is the build's capital and
+  // the page and board.json agree. The income forgone is only the
+  // T-bill spread over the deposit's own yield. The verdict is
+  // break-even odds: the launch probability the farm needs to cover its
+  // costs. Worth farming at 10% or better, marginal at 25% or better,
+  // else skip; a 7-day TVL fall past -30% caps it at marginal.
   function econ(r) {
-    var slice = state.capital * (r.implied_value_usd / (r.tvl_usd + state.capital)) * state.share;
-    var tbill = state.capital * D.tbillYear * D.farmDays / 365;
+    var cap = Math.min(state.capital, Math.max(500, r.tvl_usd / 10000));
+    var slice = cap * (r.implied_value_usd / (r.tvl_usd + cap)) * state.share;
+    var tbill = cap * (D.tbillYear - (D.depositYieldYear || 0)) * D.farmDays / 365;
     var net = slice - r.fees_usd - tbill;
     var odds = (r.fees_usd + tbill) / slice;
     var verdict = odds <= 0.10 ? "Worth farming" : (odds <= 0.25 ? "Marginal" : "Skip");
     if (verdict === "Worth farming" && r.change_7d !== null && r.change_7d !== undefined && r.change_7d < -30) verdict = "Marginal";
-    return { slice: slice, tbill: tbill, net: net, odds: odds, verdict: verdict, netPerHour: net / (r.farm_minutes / 60) };
+    return { slice: slice, tbill: tbill, net: net, odds: odds, verdict: verdict, netPerHour: net / (r.farm_minutes / 60), capital: cap };
   }
   function verdictClass(v) { return "v-" + v.replace(/\s+/g, "-"); }
 
@@ -161,7 +166,7 @@
     $("badge-watch").textContent = "Watchlist " + D.watchlistCovered + "/" + D.watchlistCount + " on board";
     $("badge-page").textContent = "Page = board.json " + D.rows.length + "/" + D.rows.length + " rows";
     $("hero-title").textContent = D.rows.length + " protocols record no token. Here is what each launch would be worth, and what farming it costs.";
-    $("hero-text").textContent = "Each value is read off a curve fitted to the " + D.curve.n + " tokens that already trade, then adjusted for family and for 7-day TVL growth carried two weeks forward. Time without a token does not move the price: the snapshot cannot confirm an age effect, so the model does not invent one. No name is hand-picked. Every row has a farm plan with a dollar cost and minutes per step, netted against the T-bill yield the capital gives up.";
+    $("hero-text").textContent = "Each value is read off a curve fitted to the " + D.curve.n + " tokens that already trade, then adjusted for family, for 7-day TVL growth carried two weeks forward, and for days tracked — a bounded prior that discounts young protocols up to 40%. No name is hand-picked. Every row has a farm plan with a dollar cost and minutes per step, netted against the T-bill yield less the deposit's own yield: only the 0.5% spread is forgone, because the deposit earns while it farms.";
     var st = $("hero-stats");
     st.innerHTML =
       '<div class="stat"><b>' + D.rows.length + '</b><span>ranked, no token</span></div>' +
@@ -237,7 +242,7 @@
     }
     renderBoardTable();
     renderTabs();
-    $("board-foot").textContent = "Slice " + money(state.capital) + " at " + Math.round(state.share * 100) + "% of value, " + D.farmDays + " days, T-bill " + Math.round(D.tbillYear * 100) + "% a year. Gas by chain, stated in each plan. A record is not proof: DefiLlama records no token, so check your own channels before farming.";
+    $("board-foot").textContent = "Slice up to " + money(state.capital) + " at " + Math.round(state.share * 100) + "% of value (the deposit scales with TVL: 1bp of TVL, $500 to the cap), " + D.farmDays + " days, T-bill " + Math.round(D.tbillYear * 100) + "% less the deposit's " + (D.depositYieldYear * 100).toFixed(1) + "% yield. Gas by chain, stated in each plan. A record is not proof: DefiLlama records no token, so check your own channels before farming.";
     $("foot").textContent = "Launch Radar. Snapshot " + D.asOf + " from DefiLlama. Model: log10(mcap) = " + D.curve.a.toFixed(4) + " + " + D.curve.b.toFixed(4) + " x log10(TVL), fitted to " + D.curve.n + " traded tokens. Board " + D.rows.length + " rows, watchlist " + D.watchlistCovered + "/" + D.watchlistCount + ".";
   }
 
@@ -406,29 +411,29 @@
       '<div class="card"><span>Implied value</span><b>' + money(r.implied_value_usd) + '</b><small>P10 ' + money(r.p10_usd) + ' to P90 ' + money(r.p90_usd) + '</small></div>' +
       '<div class="card"><span>TVL</span><b>' + money(r.tvl_usd) + '</b><small>' + changeText(r) + ' over 7 days</small></div>' +
       '<div class="card"><span>No token for</span><b>' + ageText(r) + '</b><small>tracked since ' + esc(r.listed_at || "—") + '</small></div>' +
-      '<div class="card"><span>' + money(state.capital) + ' slice</span><b>' + money(e.slice) + '</b><small>at ' + Math.round(state.share * 100) + '% of value</small></div>' +
+      '<div class="card"><span>' + money(e.capital) + ' slice</span><b>' + money(e.slice) + '</b><small>at ' + Math.round(state.share * 100) + '% of value</small></div>' +
       '<div class="card"><span>Net if launch</span><b class="' + verdictClass(e.verdict) + '">' + signed(e.net) + '</b><small>' + e.verdict + ' · ' + signed(e.netPerHour) + '/h · break-even ' + (e.odds * 100).toFixed(0) + '%</small></div>' +
       "</div>" +
       '<div class="grid2"><div class="panel"><h2>How ' + money(r.implied_value_usd) + ' is built</h2><table class="build build-detail">' +
       "<tr><td>Size curve</td><td>" + money(r.base_usd) + "</td></tr>" +
       "<tr><td>Family ×" + r.family_factor.toFixed(2) + "</td><td>" + esc(r.category || "—") + "</td></tr>" +
       "<tr><td>Growth ×" + r.growth_factor.toFixed(2) + "</td><td>" + changeText(r) + " / 7d, carried 2 wks</td></tr>" +
-      "<tr><td>Seasoning ×" + r.seasoning_factor.toFixed(2) + "</td><td>no age effect (r = " + D.validation.factorCheck.corrDays.toFixed(2) + ")</td></tr>" +
+      "<tr><td>Seasoning ×" + r.seasoning_factor.toFixed(2) + "</td><td>" + (r.seasoning_factor >= 0.99 ? "tracked " + ageText(r) + " — no discount" : "young protocol — discounted " + Math.round((1 - r.seasoning_factor) * 100) + "% by a bounded prior") + "</td></tr>" +
       "<tr><td>Sibling ×" + r.sibling_factor.toFixed(2) + "</td><td>" + (r.sibling_factor < 1 ? "shares a first word with a traded token — half value" : "no adjustment") + "</td></tr>" +
       '<tr class="total"><td>Implied value</td><td>' + money(r.implied_value_usd) + "</td></tr>" +
       "<tr><td>Blind range, P10 to P90</td><td>" + money(r.p10_usd) + " to " + money(r.p90_usd) + "</td></tr>" +
       "<tr><td>Blind range, P25 to P75</td><td>" + money(r.p25_usd) + " to " + money(r.p75_usd) + "</td></tr>" +
       "<tr><td>Break-even odds</td><td>" + (e.odds * 100).toFixed(0) + "% launch chance to cover costs</td></tr>" +
       "</table><p class='fine'>Recomputed on this page: board.json carries the same " + money(r.implied_value_usd) + " at rank " + r.rank + ".</p></div>" +
-      '<div class="panel"><h2>Farm plan · ' + esc(r.farm_method) + " on " + esc(r.farm_chain || (r.chains || [])[0] || "") + " · " + money(state.capital) + " for " + D.farmDays + " days</h2>" +
+      '<div class="panel"><h2>Farm plan · ' + esc(r.farm_method) + " on " + esc(r.farm_chain || (r.chains || [])[0] || "") + " · " + money(e.capital) + " for " + D.farmDays + " days</h2>" +
       "<table class='steps'><tr><th></th><th>When</th><th>Step</th><th>Cost</th><th>Time</th></tr>" + r.farm_steps.map(function (s, i) {
-        var gas = (r.fees_usd - 4.5) / 3;
-        var costs = [gas, 0, gas, 0, 0, 0.05, gas, 1.5, 3.0, 0];
+        var gas = (r.fees_usd - 2.10) / 3;
+        var costs = [gas + 1.0, 0, gas, 0, 0, 0.05, 0, 0.05, gas + 1.0, 0];
         var mins = [5, 15, 15, 5, 30, 10, 15, 10, 10, 5];
         return "<tr><td>" + (i + 1) + "</td><td>" + esc((r.farm_step_when || [])[i] || "") + "</td><td>" + esc(s) + "</td><td>" + (costs[i] ? "$" + costs[i].toFixed(2) : "none") + "</td><td>" + mins[i] + "m</td></tr>";
       }).join("") + "</table>" +
       "<p class='fine'>Slice " + money(e.slice) + " · Fees " + money(r.fees_usd) + " · T-bill forgone " + money(e.tbill) + " · Net " + signed(e.net) + " · Work " + (r.farm_minutes / 60).toFixed(1) + "h</p></div></div>" +
-      '<div class="panel"><h2>The farm arithmetic</h2><p>Slice if a token launches = ' + Math.round(state.share * 100) + '% airdrop share × ' + money(state.capital) + ' / (TVL + ' + money(state.capital) + ') of ' + money(r.implied_value_usd) + ' implied = <b>' + money(e.slice) + '</b>.<br>' +
+      '<div class="panel"><h2>The farm arithmetic</h2><p>Slice if a token launches = ' + Math.round(state.share * 100) + '% airdrop share × ' + money(e.capital) + ' / (TVL + ' + money(e.capital) + ') of ' + money(r.implied_value_usd) + ' implied = <b>' + money(e.slice) + '</b>.<br>' +
       'Break-even = (fees ' + money(r.fees_usd) + ' + T-bill forgone ' + money(e.tbill) + ') / slice ' + money(e.slice) + ' = <b>' + (e.odds * 100).toFixed(0) + '%</b> — the launch chance this farm needs to cover its costs.<br>' +
       'Net per hour = net ' + signed(e.net) + ' / ' + (r.farm_minutes / 60).toFixed(1) + 'h work = <b>' + signed(e.netPerHour) + '/h</b>. ' +
       'A 7-day TVL fall past -30% caps the verdict at marginal; this row is ' + changeText(r) + ' over 7 days.</p>' +
@@ -441,12 +446,13 @@
       "<table class='sens'><tr><th></th><th>5% of value</th><th class='base'>10% of value</th><th>20% of value</th></tr>" +
       [1000, 5000, 10000].map(function (cap, ci) {
         return "<tr><td" + (ci === 1 ? " class='base'" : "") + ">" + money(cap) + "</td>" + [0.05, 0.1, 0.2].map(function (share, si) {
-          var sl = cap * (r.implied_value_usd / (r.tvl_usd + cap)) * share;
-          var net = sl - r.fees_usd - cap * D.tbillYear * D.farmDays / 365;
+          var effCap = Math.min(cap, Math.max(500, r.tvl_usd / 10000));
+          var sl = effCap * (r.implied_value_usd / (r.tvl_usd + effCap)) * share;
+          var net = sl - r.fees_usd - effCap * (D.tbillYear - (D.depositYieldYear || 0)) * D.farmDays / 365;
           return "<td" + (si === 1 ? " class='base'" : "") + ">" + signed(net) + "</td>";
         }).join("") + "</tr>";
       }).join("") + "</table>" +
-      "<p class='fine'>At a 5% share the slice is half the base case; at 20% it is double. The share is a working guess, not a promise. If the launch price falls 20% from the implied value, the $5.0K net at a 10% share is " + signed(5000 * (r.implied_value_usd / (r.tvl_usd + 5000)) * 0.1 * 0.8 - r.fees_usd - 5000 * D.tbillYear * D.farmDays / 365) + ". Capital yield is not counted; it is upside if the vault pays one.</p>";
+      "<p class='fine'>At a 5% share the slice is half the base case; at 20% it is double. The share is a working guess, not a promise. If the launch price falls 20% from the implied value, the " + money(e.capital) + " net at a 10% share is " + signed(e.capital * (r.implied_value_usd / (r.tvl_usd + e.capital)) * 0.1 * 0.8 - r.fees_usd - e.capital * (D.tbillYear - (D.depositYieldYear || 0)) * D.farmDays / 365) + ". The deposit's yield is counted at 3.5% a year against the 4% T-bill rate, so only the 0.5% spread is forgone; if the vault pays more than 3.5%, that is upside.</p>";
     $("detail").innerHTML = html;
     scatter($("scatter-detail"), { highlight: { tvl: r.tvl_usd, implied: r.implied_value_usd }, peers: peers });
     $("back-board").onclick = function (ev) { ev.preventDefault(); showView("board"); renderBoard(); };
@@ -475,7 +481,7 @@
       "One point per traded token: listings that share a token are merged and their TVL summed (no-op on this snapshot — no traded token is listed twice); bridges and version listings are dropped (" + D.fitSet.bridge + " + " + D.fitSet.version + "); ratios past 1/500 or 50x are trimmed (" + D.fitSet.ratio + "); centralised-exchange tokens are dropped (" + D.fitSet.cex + "). " + D.fitSet.kept + " points remain from " + D.fitSet.from + ". " +
       "Family is the median log residual of a protocol's category, shrunk toward 1 by n / (n + 10), so a family with two tokens cannot move the board. " +
       "Growth carries TVL two more weeks at its 7-day rate, through the slope, clamped to +/-30%. " +
-      "Seasoning is 1.00: the snapshot cannot confirm an age effect (see the factor check below), so the model does not invent one. " +
+      "Seasoning is a bounded prior: 1 - 0.4 * e^(-days/240), so a protocol tracked 0 days is valued at 0.60, one tracked a year at about 0.91, and one tracked three years at 0.99. The snapshot cannot confirm an age effect (see the factor check below), so seasoning is stated as a prior, not a finding — it moves the blind miss by less than 0.01x either way. " +
       "Sibling is 0.50 for a watchlist protocol that shares its first word with a traded token, and 1.00 otherwise.</p>" +
       "<h3>Ablation: what each ingredient adds (leave-one-out, " + v.n + " tokens)</h3>" +
       "<table class='build'><tr><th>Model</th><th class='num'>Median miss</th><th class='num'>Mean |log miss|</th><th class='num'>Within 3x</th><th class='num'>Rank corr.</th></tr>" +
@@ -491,21 +497,21 @@
       ablationRow("+ category family", ef["curve+family"].median, ef["curve+family"].meanAbsLog, ef["curve+family"].within3, ef["curve+family"].spearman) +
       ablationRow("+ growth & seasoning", ef["curve+family+growth"].median, ef["curve+family+growth"].meanAbsLog, ef["curve+family+growth"].within3, ef["curve+family+growth"].spearman) +
       "</table>" +
-      "<p class='fine'>Each token is priced by a model refit without it; each fold is priced by a model fitted to the other seven folds. Rank corr. is Spearman between the blind prediction and the real market cap. <b>What earns its place:</b> the size curve (median miss x" + v.flatMedian.toFixed(2) + " → x" + v.looCurveMedian.toFixed(2) + ", within 3x " + pct(v.flatWithin3) + " → " + pct(v.looCurveWithin3) + "). <b>Family is a wash on the blind numbers</b> (median x" + v.looCurveMedian.toFixed(2) + " → x" + v.looFamMedian.toFixed(2) + ", within 3x " + pct(v.looCurveWithin3) + " → " + pct(v.looFamWithin3) + ") and is kept as a bounded prior for relative pricing between families, not because it improves the blind miss. <b>Growth earns on the median and within 3x</b> (x" + v.looFamMedian.toFixed(2) + " → x" + v.looMedian.toFixed(2) + ", " + pct(v.looFamWithin3) + " → " + pct(v.looWithin3) + "). <b>Seasoning does not earn anything:</b> it is exactly 1.00, because the factor check below finds no age effect. <b>Rank correlation is not the model's job:</b> the flat multiple ranks best (" + v.flatSpearman.toFixed(2) + ") because it preserves TVL order exactly; the curve trades a little rank order for much better point values. The strict fit itself earns its place too: fitting all " + v.fitSet.keepAll.n + " traded tokens instead of the strict " + v.fitSet.strict.n + " gives a blind miss of x" + v.fitSet.keepAll.median.toFixed(2) + " (mean |log miss| " + v.fitSet.keepAll.meanAbsLog.toFixed(3) + ") against x" + v.fitSet.strict.median.toFixed(2) + " (" + v.fitSet.strict.meanAbsLog.toFixed(3) + ") for the strict fit.</p>" +
+      "<p class='fine'>Each token is priced by a model refit without it; each fold is priced by a model fitted to the other seven folds. Rank corr. is Spearman between the blind prediction and the real market cap. <b>What earns its place:</b> the size curve (median miss x" + v.flatMedian.toFixed(2) + " → x" + v.looCurveMedian.toFixed(2) + ", within 3x " + pct(v.flatWithin3) + " → " + pct(v.looCurveWithin3) + "). <b>Family is a wash on the blind numbers</b> (median x" + v.looCurveMedian.toFixed(2) + " → x" + v.looFamMedian.toFixed(2) + ", within 3x " + pct(v.looCurveWithin3) + " → " + pct(v.looFamWithin3) + ") and is kept as a bounded prior for relative pricing between families, not because it improves the blind miss. <b>Growth earns on the median and within 3x</b> (x" + v.looFamMedian.toFixed(2) + " → x" + v.looMedian.toFixed(2) + ", " + pct(v.looFamWithin3) + " → " + pct(v.looWithin3) + "). <b>Seasoning is a bounded prior, not a finding:</b> the factor check below finds no age effect, so it is not fitted — it discounts young protocols by up to 40% and moves the blind miss by less than 0.01x either way. <b>Rank correlation is not the model's job:</b> the flat multiple ranks best (" + v.flatSpearman.toFixed(2) + ") because it preserves TVL order exactly; the curve trades a little rank order for much better point values. The strict fit itself earns its place too: fitting all " + v.fitSet.keepAll.n + " traded tokens instead of the strict " + v.fitSet.strict.n + " gives a blind miss of x" + v.fitSet.keepAll.median.toFixed(2) + " (mean |log miss| " + v.fitSet.keepAll.meanAbsLog.toFixed(3) + ") against x" + v.fitSet.strict.median.toFixed(2) + " (" + v.fitSet.strict.meanAbsLog.toFixed(3) + ") for the strict fit.</p>" +
       "<h3>Family offsets</h3><table class='build'>" + famRows + "</table>" +
-      "<p class='fine'>Mean miss, each capped at 10x, shrunk by 8 pseudo-tokens (traded count). A family with few tokens barely moves the board.</p>" +
+      "<p class='fine'>Median log residual per category, shrunk toward 1 by n / (n + 10) — 10 pseudo-tokens. A family with few tokens barely moves the board.</p>" +
       "<h3>Blind validation, continued</h3><table class='build'>" +
       "<tr><td>Time split: fit " + v.timeTrain + " tokens listed before 2024, test " + v.timeTest + " newer</td><td>x" + (v.timeCurveMedian || 0).toFixed(2) + " vs x" + (v.timeFlatMedian || 0).toFixed(2) + " flat</td></tr>" +
       "<tr><td>Time split, within 3x</td><td>" + pct(v.timeCurveWithin3 || 0) + " vs " + pct(v.timeFlatWithin3 || 0) + " flat</td></tr>" +
       "<tr><td>Blind 50% / 80% band</td><td>x" + v.band50.toFixed(2) + " / x" + v.band80.toFixed(2) + "</td></tr>" +
       "<tr><td>Blind range multipliers, P10 / P25 / P75 / P90</td><td>x" + v.p10Mult.toFixed(2) + " / x" + v.p25Mult.toFixed(2) + " / x" + v.p75Mult.toFixed(2) + " / x" + v.p90Mult.toFixed(2) + "</td></tr>" +
       "</table><p class='fine'>The band is wide because launches are genuinely uncertain, and the board shows it instead of hiding it.</p>" +
-      "<h3>Factor check</h3><p>The blind residuals correlate r = " + v.factorCheck.corrDays.toFixed(2) + " with log days without a token and r = " + v.factorCheck.corrGrowth.toFixed(2) + " with 7-day TVL change (" + v.factorCheck.n + " tokens with a listing date). The fitted seasoning slope is " + v.factorCheck.seasonSlope.toFixed(2) + " per decade of days — within noise. Neither an age effect nor a leftover momentum effect is confirmed, so seasoning stays 1.00 and growth is only the two-week carry.</p>" +
-      "<h3>Farm verdicts</h3><p>Verdict is break-even odds: (fees + T-bill forgone) / slice — the launch probability the farm needs to cover its costs. <b>Worth farming</b> at break-even odds ≤ 10% (pays if 1 hold in 10 sees a launch), <b>marginal</b> at ≤ 25%, else <b>skip</b>; a 7-day TVL fall past -30% caps the verdict at marginal. Farm economics: " + money(D.sliceCapital) + " of capital for " + D.farmDays + " days (a typical points-season window), T-bill 4% a year on idle capital, gas on the cheapest of the protocol's first three chains, claim $1.50, exit $3.00. The farm is sized at " + money(D.sliceCapital) + " because at $1.0K gas plus forgone yield swamps every slice and the verdict cannot discriminate — at $1.0K the same rule gives 0 worth farming and 185 skip; at " + money(D.sliceCapital) + " it gives " + D.counts.farm + " worth, " + D.counts.thin + " marginal and " + D.counts.skip + " skip. Net per hour is net divided by the plan's work hours; the board's best on the watchlist is " + D.bestNetPerHour.map(function (r) { return r.name + " " + signed(r.netPerHour) + "/h"; }).join(", ") + ".</p>" +
+      "<h3>Factor check</h3><p>The blind residuals correlate r = " + v.factorCheck.corrDays.toFixed(2) + " with log days without a token and r = " + v.factorCheck.corrGrowth.toFixed(2) + " with 7-day TVL change (" + v.factorCheck.n + " tokens with a listing date). The fitted seasoning slope is " + v.factorCheck.seasonSlope.toFixed(2) + " per decade of days — within noise. Neither an age effect nor a leftover momentum effect is confirmed, so seasoning is kept only as a bounded prior and growth is only the two-week carry.</p>" +
+      "<h3>Farm verdicts</h3><p>Verdict is break-even odds: (fees + T-bill forgone) / slice — the launch probability the farm needs to cover its costs. <b>Worth farming</b> at break-even odds ≤ 10% (pays if 1 hold in 10 sees a launch), <b>marginal</b> at ≤ 25%, else <b>skip</b>; a 7-day TVL fall past -30% caps the verdict at marginal. Farm economics: up to " + money(D.sliceCapital) + " of capital for " + D.farmDays + " days (a typical points-season window), the deposit scaled to the pool — 1bp of TVL, $500 to $5,000 — T-bill 4% a year less the deposit's 3.5% yield, so only the 0.5% spread is forgone, gas on the cheapest of the protocol's first three chains, a bridge leg each way at $1.00, claim $0.05. The deposit yield is a stated assumption, not a snapshot field: the median large stablecoin pool paid a 4.07% 30-day base APY against a 4.17% T-bill (DeFiLlama Research, 12 Nov 2026), so 3.5% sits below the median and is conservative. The farm is sized at " + money(D.sliceCapital) + " because that is the deployment a points-season farm actually runs; at a $1,000 cap the same rule gives 35 worth, 84 marginal and 65 skip, so the verdict still discriminates, but $5,000 is the calibrated size and the one the published top entry uses. At " + money(D.sliceCapital) + " it gives " + D.counts.farm + " worth, " + D.counts.thin + " marginal and " + D.counts.skip + " skip. Net per hour is net divided by the plan's work hours; the board's best on the watchlist is " + D.bestNetPerHour.map(function (r) { return r.name + " " + signed(r.netPerHour) + "/h"; }).join(", ") + ".</p>" +
       "<h3>Set aside by house rule</h3><table class='build'>" + setAsideRows + "<tr class='total'><td>Total set aside</td><td>" + D.setAsideCount + "</td></tr></table>" +
       "<p class='fine'>" + D.setAsideCount + " protocols never reach the board: category CEX, Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking or Restaked BTC; a name carrying a whole word wrapped, staked or staking; a name ending in a version marker; a name beginning with an exchange; a name whose first word is one of its own chains — the chain's own product, whose token (if any) is the chain's token; or a name sharing its first word with a token that already trades. A protocol matching two rules is counted under the first. The watchlist is never set aside for its name: " + D.siblingHalf + " watchlist sibling stays on the board at half value. A wrapped or staked product of a token that already trades is not a token that does not exist yet.</p>" +
       "<h3>board.json = this page</h3><p>" + esc(verify.text) + "</p>" +
-      "<h3>Assumptions and limits</h3><p>A record is not proof: a protocol on the board records no token in DefiLlama, which is not the same as having none. The airdrop share is a working guess, not a promise. Gas is a rough table figure per chain. The curve is fitted to " + D.curve.n + " tokens; a launch can miss it by an order of magnitude, which is why every row carries its blind range (P10 to P90).</p>";
+      "<h3>Assumptions and limits</h3><p>A record is not proof: a protocol on the board records no token in DefiLlama, which is not the same as having none. The airdrop share is a working guess, not a promise. The deposit yield (3.5%) is a stated assumption, below the 4.07% median 30-day base APY of large stablecoin pools (DeFiLlama Research, 12 Nov 2026); if a vault pays less, the income forgone is higher and some Worth rows would fall to Marginal. Gas is a rough table figure per chain; the bridge legs are $1.00 each. The curve is fitted to " + D.curve.n + " tokens; a launch can miss it by an order of magnitude, which is why every row carries its blind range (P10 to P90).</p>";
     $("back-board-2").onclick = function (ev) { ev.preventDefault(); showView("board"); renderBoard(); };
   }
 

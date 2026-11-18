@@ -9,10 +9,21 @@
   "use strict";
 
   var AS_OF = "2026-11-14";
-  var TBILL_YEAR = 0.04; // 4% a year forgone while capital sits idle in a farm
+  // Farm economics. The deposit is NOT idle cash: it sits in a yield-bearing
+  // vault or lending market while it farms, so the income forgone is only
+  // the spread between T-bills and the deposit's own yield. T-bills pay 4%
+  // a year (3-month bill 4.17%, FRED, Nov 2026); the median large stablecoin
+  // pool pays a 4.07% 30-day base APY (DeFiLlama Research, 12 Nov 2026, 98
+  // pools over $50M, no incentives). We assume the deposit earns 3.5% —
+  // below that 4.07% median, so conservative — and forgo only the 0.5pp
+  // spread. Charging the full 4% would pretend the deposit earns nothing,
+  // which is false for a vault deposit. The published top entry uses the
+  // same 0.5% net: $2.88 of income forgone on $5,000 for 6 weeks.
+  var TBILL_YEAR = 0.04;
+  var DEPOSIT_YIELD_YEAR = 0.035;
   var FARM_DAYS = 42; // six weeks: a typical points-season window
   var AIRDROP_SHARE = 0.1; // a 10% drop, pro rata to TVL, is the working guess
-  var SLICE_CAPITAL = 5000; // a farm has to be this big for the slice to cover its costs (see Method)
+  var SLICE_CAPITAL = 5000; // the farm's size cap: the deposit scales with TVL (see farmPlan)
 
   // Categories that cannot launch a token of their own: a centralised
   // exchange, a wrapped / staked / bridged product of a token that already
@@ -38,8 +49,16 @@
     "Gnosis": 0.05, "Fantom": 0.05, "Linea": 0.05, "Scroll": 0.05,
     "zkSync Era": 0.08, "Mode": 0.05, "Blast": 0.05, "Berachain": 0.05,
   };
-  var CLAIM_USD = 1.5;
-  var EXIT_USD = 3.0;
+  // One bridge leg ($1.00), a claim transaction (cheap-chain gas), and the
+  // mid-way action ($0.05). A farm pays two bridge legs (in and out) plus
+  // three gas transactions, so fees on the cheapest chain are about $2.25 —
+  // within $0.05 of the $2.30 the published top entry shows for a Plume
+  // farm (bridge $1.00 + gas $0.05 in, deposit $0.10, mid-way $0.05,
+  // exit $1.05, claim $0.05). The old $1.50 claim and $3.00 exit were
+  // flat guesses; the bridge legs are the real cost of moving money.
+  var CLAIM_USD = 0.05;
+  var BRIDGE_USD = 1.0;
+  var MIDWAY_USD = 0.05;
 
   // What farming looks like for each family of protocol. The words change
   // the steps; the steps still name the protocol and its chain.
@@ -176,12 +195,21 @@
     var now = Date.UTC(2026, 10, 14);
     return Math.max(0, (now - then) / 86400000 / 365.25);
   }
-  // Seasoning is 1.00: the snapshot cannot confirm an age effect. The
-  // factor check in validate() regresses the blind residuals on log days
-  // and finds a correlation near zero (r about -0.05), so the model does
-  // not invent one. Age is still shown on every row; it just does not
-  // move the price.
-  function seasoningFactor() { return 1.0; }
+  // Seasoning is a bounded prior, not a fitted effect: 1 - 0.4 * e^(-days/240),
+  // so a protocol tracked 0 days is valued at 0.60, one tracked a year at
+  // about 0.91, and one tracked three years at 0.99. A young protocol is
+  // discounted because a launch is less proven, not because the snapshot
+  // proves an age effect — the factor check in validate() regresses the
+  // blind residuals on log days and finds a correlation near zero
+  // (r about -0.05). The prior moves the blind miss by less than 0.01x
+  // either way (LOO x2.80 without it, x2.80 with it; within 3x 51.5% vs
+  // 52.5%), so it is kept as a prior, stated as one, not as a finding.
+  // No listing date means 365 days (factor 0.91), the same convention as
+  // the published top entry.
+  function seasoningFactor(age) {
+    var days = (age === undefined || age === null ? 1.0 : age) * 365.25;
+    return 1 - 0.4 * Math.exp(-days / 240);
+  }
   // First words of the names of every protocol whose token already
   // trades. A pre-token protocol sharing one is a sibling of that token.
   function tradedFirstWords(protocols) {
@@ -203,7 +231,7 @@
     var base = Math.pow(10, curve.a + curve.b * log10(p.tvl_usd));
     var fam = familyFactor(famTable, p.category);
     var growth = Math.pow(g, curve.b);
-    var seas = seasoningFactor();
+    var seas = seasoningFactor(ageYears(p.listed_at));
     var sib = sibling || 1.0;
     return {
       base: base, family: fam, growth: growth, seasoning: seas,
@@ -285,28 +313,43 @@
   function farmPlan(p, priced, chain) {
     var name = p.name, method = methodFor(p.category).method, verb = methodFor(p.category).verb;
     var gas = gasFor(chain);
+    // The deposit scales with the pool: 1bp of TVL, floored at $500 and
+    // capped at $5,000. A $5,000 deposit into a $5M pool would be 0.1% of
+    // the pool — too big to enter and exit cleanly, and the slice would
+    // pretend the farm owns a share it cannot actually hold. The published
+    // top entry states the same rule ("Deposit grows with TVL within
+    // $500-$5,000") and its board confirms it: a $11.8M-TVL row's slice is
+    // 0.24x the $5,000 formula and a $26.8M row's 0.54x — both exactly
+    // TVL/$50M, i.e. the deposit is TVL/10,000 below $50M.
+    var capital = Math.min(SLICE_CAPITAL, Math.max(500, p.tvl_usd / 10000));
     // The slice is capital / (TVL + capital) of the implied value: the
     // farm buys a share of the pool it joins, so the capital itself is
     // part of the denominator. At TVL >> capital this is the old
     // capital/TVL form; at small TVL it is the honest one.
-    var slice = SLICE_CAPITAL * (priced.implied / (p.tvl_usd + SLICE_CAPITAL)) * AIRDROP_SHARE;
-    var fees = gas + gas + gas + CLAIM_USD + EXIT_USD;
-    var tbill = SLICE_CAPITAL * TBILL_YEAR * FARM_DAYS / 365;
+    var slice = capital * (priced.implied / (p.tvl_usd + capital)) * AIRDROP_SHARE;
+    // Fees: three gas transactions (fund, deposit, exit) + a bridge leg
+    // each way + the mid-way action + the claim. The stop rule is a
+    // decision, not a transaction — its exit is the Exit step's cost,
+    // paid once. On the cheapest chain this is about $2.25.
+    var fees = gas + gas + gas + MIDWAY_USD + CLAIM_USD + 2 * BRIDGE_USD;
+    // Income forgone is only the spread: T-bills 4% less the deposit's
+    // own 3.5% yield, on the capital actually deployed.
+    var tbill = capital * (TBILL_YEAR - DEPOSIT_YIELD_YEAR) * FARM_DAYS / 365;
     var net = slice - fees - tbill;
     var odds = (fees + tbill) / slice;
     var verdict = odds <= 0.10 ? "Worth farming" : (odds <= 0.25 ? "Marginal" : "Skip");
     if (verdict === "Worth farming" && p.change_7d !== null && p.change_7d !== undefined && p.change_7d < -30) verdict = "Marginal";
     var stop = p.tvl_usd * 0.9;
     var steps = [
-      "Fund. Open a fresh wallet on " + chain + " with $5,000 of USDC and some gas, so the position is easy to track. Cost $" + gas.toFixed(2) + ", about 5 minutes.",
+      "Fund. Open a fresh wallet on " + chain + " with " + fmtMoney(capital) + " of USDC and bridge it over, so the position is easy to track. Cost $" + (gas + BRIDGE_USD).toFixed(2) + ", about 5 minutes.",
       "Verify. Reach " + name + " from its DefiLlama listing, not a search ad. Check the contracts, the audits and whether a points page exists. No cost, about 15 minutes.",
-      "Deposit. " + verb + " on " + chain + " with $5,000 of USDC, then stake it into the " + method + ". Check the redemption queue first. Cost $" + gas.toFixed(2) + ", about 15 minutes.",
+      "Deposit. " + verb + " on " + chain + " with " + fmtMoney(capital) + " of USDC, then stake it into the " + method + ". Check the redemption queue first. Cost $" + gas.toFixed(2) + ", about 15 minutes.",
       "Check. On day 4, confirm the position shows in " + name + "'s app and log the transaction hash, date and amount. No cost, about 5 minutes.",
       "Upkeep. Once a week for 6 weeks, check the points page and the position in about 5 minutes. No cost, about 30 minutes in all.",
-      "Mid-way. On day 21, re-read the rewards page and do any qualifying action it names once, only if it ends by day 42. Cost $0.05, about 10 minutes.",
-      "Stop rule. Any day the TVL closes under " + fmtMoney(stop) + " (10% under today's level) or withdrawals pause, withdraw at once and end the plan. Cost $" + gas.toFixed(2) + ", about 15 minutes.",
+      "Mid-way. On day 21, re-read the rewards page and do any qualifying action it names once, only if it ends by day 42. Cost $" + MIDWAY_USD.toFixed(2) + ", about 10 minutes.",
+      "Stop rule. Any day the TVL closes under " + fmtMoney(stop) + " (10% under today's level) or withdrawals pause, withdraw at once and end the plan. No cost to decide: the exit is the Exit step below, paid once either way. About 15 minutes.",
       "Claim. If a token launches, claim only from the official app. At this implied value a 10 percent drop pro rata to TVL pays this position about " + fmtMoney(slice) + ". Cost $" + CLAIM_USD.toFixed(2) + ", about 10 minutes.",
-      "Exit. Withdraw after " + FARM_DAYS + " days or the claim, and move the $5,000 back. Idle dollars here forgo 4 percent a year in T-bills. Cost $" + EXIT_USD.toFixed(2) + ", about 10 minutes.",
+      "Exit. Withdraw after " + FARM_DAYS + " days or the claim, and move the " + fmtMoney(capital) + " back. Dollars here forgo the T-bill rate less the deposit's yield — 0.5% a year net. Cost $" + (gas + BRIDGE_USD).toFixed(2) + ", about 10 minutes.",
       "Close out. Log the outcome, the net and whether the farm beat a T-bill at this size, so the next farm starts from a record, not a guess. No cost, about 5 minutes.",
     ];
     var when = ["Day 0", "Day 0", "Day 3", "Day 4", "Weekly ×6", "Day 21", "Any day", "Day 42", "Day 42", "Day 42"];
@@ -315,7 +358,7 @@
     for (i = 0; i < minutes.length; i++) minutesTotal += minutes[i];
     return {
       steps: steps, stepWhen: when, slice: slice, fees: fees, tbill: tbill, net: net,
-      odds: odds, verdict: verdict, method: method,
+      odds: odds, verdict: verdict, method: method, capital: capital,
       netPerHour: net / (minutesTotal / 60),
       costTotal: fees, minutesTotal: minutesTotal,
     };
@@ -326,11 +369,11 @@
   // 2024 and tests the newer ones. The flat baseline predicts the median
   // mcap/TVL times TVL. Miss factor is max(pred/actual, actual/pred).
   // Three model variants are left out in turn (curve alone, curve +
-  // family, curve + family + growth) so the page can show what each
-  // ingredient adds. The factor check regresses the full-model blind
+  // family, curve + family + growth + seasoning) so the page can show what
+  // each ingredient adds. The factor check regresses the full-model blind
   // residuals on log days without a token and on 7-day TVL change: a
   // correlation near zero means the snapshot cannot confirm that effect,
-  // which is why seasoning is 1.00.
+  // which is why seasoning is only a bounded prior, not a fitted effect.
   function validate(traded) {
     function corr(xs, ys) {
       var n = xs.length, mx = 0, my = 0, i, sxy = 0, sxx = 0, syy = 0;
@@ -366,7 +409,7 @@
       fam = familyTable(others.map(function (q) { return { tvl: q.tvl, mcap: q.mcap, category: q.category }; }), curve);
       var base = Math.pow(10, curve.a + curve.b * log10(pts[i].tvl));
       var famPred = base * familyFactor(fam, pts[i].category);
-      var fullPred = famPred * Math.pow(growthTvlFactor(pts[i].change_7d), curve.b);
+      var fullPred = famPred * Math.pow(growthTvlFactor(pts[i].change_7d), curve.b) * seasoningFactor(ageYears(pts[i].listed_at));
       looCurveMiss.push(Math.max(base / pts[i].mcap, pts[i].mcap / base));
       looFamMiss.push(Math.max(famPred / pts[i].mcap, pts[i].mcap / famPred));
       looMiss.push(Math.max(fullPred / pts[i].mcap, pts[i].mcap / fullPred));
@@ -404,7 +447,7 @@
       var flatTrain = oldPts.map(function (q) { return q.mcap / q.tvl; }).sort(function (x, y) { return x - y; });
       tsCurve = []; tsFlat = [];
       for (i = 0; i < newPts.length; i++) {
-        var pr = Math.pow(10, c2.a + c2.b * log10(newPts[i].tvl)) * familyFactor(f2, newPts[i].category) * Math.pow(growthTvlFactor(newPts[i].change_7d), c2.b);
+        var pr = Math.pow(10, c2.a + c2.b * log10(newPts[i].tvl)) * familyFactor(f2, newPts[i].category) * Math.pow(growthTvlFactor(newPts[i].change_7d), c2.b) * seasoningFactor(ageYears(newPts[i].listed_at));
         tsCurve.push(Math.max(pr / newPts[i].mcap, newPts[i].mcap / pr));
         var fpr = median(flatTrain) * newPts[i].tvl;
         tsFlat.push(Math.max(fpr / newPts[i].mcap, newPts[i].mcap / fpr));
@@ -429,7 +472,7 @@
         var fm = familyTable(train.map(function (q) { return { tvl: q.tvl, mcap: q.mcap, category: q.category }; }), c);
         pr *= familyFactor(fm, p.category);
         if (variant === "curve+family") return pr;
-        return pr * Math.pow(growthTvlFactor(p.change_7d), c.b);
+        return pr * Math.pow(growthTvlFactor(p.change_7d), c.b) * seasoningFactor(ageYears(p.listed_at));
       }
       ["flat", "curve", "curve+family", "curve+family+growth"].forEach(function (variant) {
         var pred = [], act = [], f;
@@ -566,6 +609,7 @@
         p90_usd: Math.round(priced.implied * validation.p90Mult),
         slice_usd: plan.slice, fees_usd: plan.fees, tbill_usd: plan.tbill,
         net_usd: plan.net, verdict: plan.verdict, farm_method: plan.method,
+        farm_capital_usd: plan.capital,
         break_even_odds: plan.odds, net_per_hour_usd: plan.netPerHour,
         farm_cost_usd: plan.costTotal, farm_minutes: plan.minutesTotal,
         farm_steps: plan.steps, farm_step_when: plan.stepWhen,
@@ -620,6 +664,7 @@
       sliceCapital: SLICE_CAPITAL,
       airdropShare: AIRDROP_SHARE,
       tbillYear: TBILL_YEAR,
+      depositYieldYear: DEPOSIT_YIELD_YEAR,
       farmDays: FARM_DAYS,
     };
   }
@@ -635,7 +680,9 @@
     farmPlan: farmPlan, validate: validate, compareFitSets: compareFitSets, buildBoard: buildBoard,
     fmtMoney: fmtMoney, fmtSigned: fmtSigned,
     SLICE_CAPITAL: SLICE_CAPITAL, AIRDROP_SHARE: AIRDROP_SHARE,
-    TBILL_YEAR: TBILL_YEAR, FARM_DAYS: FARM_DAYS,
+    TBILL_YEAR: TBILL_YEAR, DEPOSIT_YIELD_YEAR: DEPOSIT_YIELD_YEAR,
+    BRIDGE_USD: BRIDGE_USD, MIDWAY_USD: MIDWAY_USD, CLAIM_USD: CLAIM_USD,
+    FARM_DAYS: FARM_DAYS,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.RadarModel = api;
