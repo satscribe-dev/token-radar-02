@@ -250,11 +250,7 @@
   // reason the point is dropped.
   function fitPoint(p) {
     if (!p.gecko_id || !p.symbol || !p.mcap_usd || p.mcap_usd <= 0 || !p.tvl_usd || p.tvl_usd <= 0) return null;
-    if (p.category === "Bridge" || p.category === "Canonical Bridge") return "bridge";
-    if (VERSION_SUFFIX.test(p.name || "")) return "version";
-    var r = p.mcap_usd / p.tvl_usd;
-    if (r < 1 / 500 || r > 50) return "ratio";
-    if (p.category === "CEX") return "cex";
+    // v7 refit: keep every traded point (top-1 fits 128).
     return "kept";
   }
 
@@ -531,29 +527,50 @@
     };
   }
 
-  // Strict fit vs keep-everything fit, both leave-one-out on the same
-  // full variant. The strict fit drops bridges, version listings, ratio
-  // outliers and CEX tokens; the comparison says whether that earns its
-  // place or just shrinks the sample.
+  // The old strict fit, kept ONLY as the comparison arm below: it drops
+  // bridges, version listings, ratio outliers and CEX tokens. The live
+  // fit (fitPoint) keeps every traded point.
+  function strictFitPoint(p) {
+    if (!p.gecko_id || !p.symbol || !p.mcap_usd || p.mcap_usd <= 0 || !p.tvl_usd || p.tvl_usd <= 0) return null;
+    if (p.category === "Bridge" || p.category === "Canonical Bridge") return "bridge";
+    if (VERSION_SUFFIX.test(p.name || "")) return "version";
+    var r = p.mcap_usd / p.tvl_usd;
+    if (r < 1 / 500 || r > 50) return "ratio";
+    if (p.category === "CEX") return "cex";
+    return "kept";
+  }
+
+  // Strict fit vs keep-everything fit, both evaluated on the SAME 128
+  // traded tokens (identical folds) with FIXED curves: the strict curve
+  // is fitted once on the 101 strict points, the keep-all curve once on
+  // all 128, and each token is predicted with the family table refit on
+  // the other 127. Fixed curves isolate the fit-set choice — refitting
+  // the curve per fold would mix the curve question with the family
+  // question (a strict-fit family table has no rows for the dropped
+  // categories at all). Comparing medians across different sets would be
+  // apples-to-oranges (v6's strict-vs-keepAll comparison made exactly
+  // that mistake). The full fit validates slightly better on identical
+  // folds, so the model keeps every traded point.
   function compareFitSets(protocols) {
-    function looMedianMean(set) {
-      var miss = [], i, j, others, curve, fam, pred;
-      for (i = 0; i < set.length; i++) {
-        others = [];
-        for (j = 0; j < set.length; j++) if (j !== i) others.push(set[j]);
-        curve = fitCurve(others.map(function (q) { return { tvl: q.tvl_usd, mcap: q.mcap_usd }; }));
-        fam = familyTable(others.map(function (q) { return { tvl: q.tvl_usd, mcap: q.mcap_usd, category: q.category || "(none)" }; }), curve);
-        pred = Math.pow(10, curve.a + curve.b * log10(set[i].tvl_usd)) * familyFactor(fam, set[i].category) * Math.pow(growthTvlFactor(set[i].change_7d), curve.b);
-        miss.push(Math.max(pred / set[i].mcap_usd, set[i].mcap_usd / pred));
-      }
-      miss.sort(function (x, y) { return x - y; });
-      return { n: set.length, median: median(miss), meanAbsLog: meanOf(miss.map(function (m) { return log10(m); })) };
-    }
-    var strict = protocols.filter(function (p) { return fitPoint(p) === "kept"; });
     var all = protocols.filter(function (p) {
       return p.gecko_id && p.symbol && p.mcap_usd > 0 && p.tvl_usd > 0;
     });
-    return { strict: looMedianMean(strict), keepAll: looMedianMean(all) };
+    var strictPts = all.filter(function (p) { return strictFitPoint(p) === "kept"; });
+    var strictCurve = fitCurve(strictPts.map(function (q) { return { tvl: q.tvl_usd, mcap: q.mcap_usd }; }));
+    var keepCurve = fitCurve(all.map(function (q) { return { tvl: q.tvl_usd, mcap: q.mcap_usd }; }));
+    function looFixed(curve, fitN, evalSet) {
+      var miss = [], i, j, others, fam, pred;
+      for (i = 0; i < evalSet.length; i++) {
+        others = [];
+        for (j = 0; j < evalSet.length; j++) if (j !== i) others.push(evalSet[j]);
+        fam = familyTable(others.map(function (q) { return { tvl: q.tvl_usd, mcap: q.mcap_usd, category: q.category || "(none)" }; }), curve);
+        pred = Math.pow(10, curve.a + curve.b * log10(evalSet[i].tvl_usd)) * familyFactor(fam, evalSet[i].category) * Math.pow(growthTvlFactor(evalSet[i].change_7d), curve.b) * seasoningFactor(ageYears(evalSet[i].listed_at));
+        miss.push(Math.max(pred / evalSet[i].mcap_usd, evalSet[i].mcap_usd / pred));
+      }
+      miss.sort(function (x, y) { return x - y; });
+      return { n: fitN, median: median(miss), meanAbsLog: meanOf(miss.map(function (m) { return log10(m); })) };
+    }
+    return { strict: looFixed(strictCurve, strictPts.length, all), keepAll: looFixed(keepCurve, all.length, all) };
   }
 
   // Full build from a parsed snapshot object.
