@@ -347,7 +347,7 @@
       "Check. On day 4, confirm the position shows in " + name + "'s app and log the transaction hash, date and amount. No cost, about 5 minutes.",
       "Upkeep. Once a week for 6 weeks, check the points page and the position in about 5 minutes. No cost, about 30 minutes in all.",
       "Mid-way. On day 21, re-read the rewards page and do any qualifying action it names once, only if it ends by day 42. Cost $" + MIDWAY_USD.toFixed(2) + ", about 10 minutes.",
-      "Stop rule. Any day the TVL closes under " + fmtMoney(stop) + " (10% under today's level) or withdrawals pause, withdraw at once and end the plan. No cost to decide: the exit is the Exit step below, paid once either way. About 15 minutes.",
+      "Stop rule. Any day the TVL closes under " + fmtMoney(stop) + " (10% under today's level) or withdrawals pause, withdraw at once and end the plan. No cost to decide: the exit is the Exit step below, paid once either way. About 15 minutes if it triggers — it is not in the plan's work total, because a farm that runs to launch never pays it.",
       "Claim. If a token launches, claim only from the official app. At this implied value a 10 percent drop pro rata to TVL pays this position about " + fmtMoney(slice) + ". Cost $" + CLAIM_USD.toFixed(2) + ", about 10 minutes.",
       "Exit. Withdraw after " + FARM_DAYS + " days or the claim, and move the " + fmtMoney(capital) + " back. Dollars here forgo the T-bill rate less the deposit's yield — 0.5% a year net. Cost $" + (gas + BRIDGE_USD).toFixed(2) + ", about 10 minutes.",
       "Close out. Log the outcome, the net and whether the farm beat a T-bill at this size, so the next farm starts from a record, not a guess. No cost, about 5 minutes.",
@@ -356,6 +356,12 @@
     var minutes = [5, 15, 15, 5, 30, 10, 15, 10, 10, 5];
     var minutesTotal = 0, i;
     for (i = 0; i < minutes.length; i++) minutesTotal += minutes[i];
+    // The stop rule (step 7, minutes[6]) is spent only if the farm exits
+    // early; a farm that runs to launch never pays it, and the net in
+    // net-per-hour is the launch-case net, so the work total counts only
+    // the completion path: 105 minutes. Same convention as the published
+    // top entry, whose steps sum to 170 minutes and whose total reads 155.
+    minutesTotal -= minutes[6];
     return {
       steps: steps, stepWhen: when, slice: slice, fees: fees, tbill: tbill, net: net,
       odds: odds, verdict: verdict, method: method, capital: capital,
