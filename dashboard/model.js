@@ -182,8 +182,10 @@
   // slope: a fast-growing protocol is worth more than its TVL today, but
   // the sublinear curve damps the carry. The total carry is clamped to
   // +/-30%. Returns the TVL multiplier; the value multiplier is mult^b.
-  // Blind-tested: on the 101-token fit set this beats a post-curve
-  // 1 + change multiplier on every cut (see validate).
+  // Blind-tested on the 128-token fit set: through the slope beats a
+  // post-curve multiplier on median miss (x3.20 vs x3.38) and on mean
+  // |log miss| (0.691 vs 0.696), though the post-curve form is ahead on
+  // within-3x (46.9% vs 48.4%).
   function growthTvlFactor(change7d) {
     if (change7d === null || change7d === undefined) return 1.0;
     return clamp(Math.pow(1 + change7d / 100, 2), 0.7, 1.3);
@@ -201,9 +203,10 @@
   // discounted because a launch is less proven, not because the snapshot
   // proves an age effect — the factor check in validate() regresses the
   // blind residuals on log days and finds a correlation near zero
-  // (r about -0.05). The prior moves the blind miss by less than 0.01x
-  // either way (LOO x2.80 without it, x2.80 with it; within 3x 51.5% vs
-  // 52.5%), so it is kept as a prior, stated as one, not as a finding.
+  // (r about -0.05). The prior moves the median blind miss by about
+  // 0.05x (LOO x3.25 without it, x3.20 with it; within 3x 46.1% vs
+  // 46.9%; mean |log miss| 0.688 vs 0.691), so it is kept as a prior,
+  // stated as one, not as a finding.
   // No listing date means 365 days (factor 0.91), the same convention as
   // the published top entry.
   function seasoningFactor(age) {
@@ -243,11 +246,12 @@
   // The curve is fitted to the traded tokens that can stand for a
   // launch. One point per traded token: listings that share a token are
   // merged and their TVL summed (no-op on this snapshot: no traded token
-  // is listed twice); bridges and version listings are not standalone
-  // tokens; ratios past 1/500 or 50x are outliers, not a curve; and a
-  // centralised exchange's token is not a protocol launch. Each step is
-  // counted so the method page can state it. Returns "kept" or the
-  // reason the point is dropped.
+  // is listed twice). Since the v7 refit the fit keeps every traded
+  // point — nothing is dropped for being a bridge, a version listing, an
+  // extreme ratio or a centralised-exchange token; those exclusions live
+  // only in strictFitPoint, the comparison arm in compareFitSets.
+  // Returns "kept" for every traded point, or null when the protocol
+  // has no token, market cap or TVL to fit on.
   function fitPoint(p) {
     if (!p.gecko_id || !p.symbol || !p.mcap_usd || p.mcap_usd <= 0 || !p.tvl_usd || p.tvl_usd <= 0) return null;
     // v7 refit: keep every traded point (top-1 fits 128).
@@ -306,7 +310,7 @@
   // to cover its costs. Worth farming at 10% or better (pays if 1 hold in
   // 10 sees a launch), marginal at 25% or better, else skip; a 7-day TVL
   // fall past -30% caps the verdict at marginal.
-  function farmPlan(p, priced, chain) {
+  function farmPlan(p, priced, chain, capOverride) {
     var name = p.name, method = methodFor(p.category).method, verb = methodFor(p.category).verb;
     var gas = gasFor(chain);
     // The deposit scales with the pool: 1bp of TVL, floored at $500 and
@@ -317,7 +321,7 @@
     // $500-$5,000") and its board confirms it: a $11.8M-TVL row's slice is
     // 0.24x the $5,000 formula and a $26.8M row's 0.54x — both exactly
     // TVL/$50M, i.e. the deposit is TVL/10,000 below $50M.
-    var capital = Math.min(SLICE_CAPITAL, Math.max(500, p.tvl_usd / 10000));
+    var capital = Math.min(capOverride || SLICE_CAPITAL, Math.max(500, p.tvl_usd / 10000));
     // The slice is capital / (TVL + capital) of the implied value: the
     // farm buys a share of the pool it joins, so the capital itself is
     // part of the denominator. At TVL >> capital this is the old
@@ -326,7 +330,7 @@
     // Fees: three gas transactions (fund, deposit, exit) + a bridge leg
     // each way + the mid-way action + the claim. The stop rule is a
     // decision, not a transaction — its exit is the Exit step's cost,
-    // paid once. On the cheapest chain this is about $2.25.
+    // paid once. On the cheapest chains this is $2.16 to $2.25.
     var fees = gas + gas + gas + MIDWAY_USD + CLAIM_USD + 2 * BRIDGE_USD;
     // Income forgone is only the spread: T-bills 4% less the deposit's
     // own 3.5% yield, on the capital actually deployed.
@@ -541,36 +545,38 @@
   }
 
   // Strict fit vs keep-everything fit, both evaluated on the SAME 128
-  // traded tokens (identical folds) with FIXED curves: the strict curve
-  // is fitted once on the 101 strict points, the keep-all curve once on
-  // all 128, and each token is predicted with the family table refit on
-  // the other 127. Fixed curves isolate the fit-set choice — refitting
-  // the curve per fold would mix the curve question with the family
-  // question (a strict-fit family table has no rows for the dropped
-  // categories at all). Comparing medians across different sets would be
-  // apples-to-oranges (v6's strict-vs-keepAll comparison made exactly
-  // that mistake). The full fit validates slightly better on identical
-  // folds, so the model keeps every traded point.
+  // traded tokens (identical folds), with the curve refit per fold from
+  // the arm's own fit set — the strict curve from the strict points
+  // minus the token being priced, the keep-all curve from all points
+  // minus it — and the family table refit per fold on the full eval set
+  // in both arms, exactly as validate() does. That is the apples-to-
+  // apples comparison: only the fit set differs, never the estimator.
+  // (The earlier fixed-curve version quoted a different blind miss for
+  // the same model — x3.16 — than the ablation table's x3.20, because
+  // its curve was fitted once on all 128 including the token priced.
+  // Refitting per fold makes the fit-set numbers agree with validate().)
+  // The full fit validates slightly better on identical folds, so the
+  // model keeps every traded point.
   function compareFitSets(protocols) {
     var all = protocols.filter(function (p) {
       return p.gecko_id && p.symbol && p.mcap_usd > 0 && p.tvl_usd > 0;
     });
     var strictPts = all.filter(function (p) { return strictFitPoint(p) === "kept"; });
-    var strictCurve = fitCurve(strictPts.map(function (q) { return { tvl: q.tvl_usd, mcap: q.mcap_usd }; }));
-    var keepCurve = fitCurve(all.map(function (q) { return { tvl: q.tvl_usd, mcap: q.mcap_usd }; }));
-    function looFixed(curve, fitN, evalSet) {
-      var miss = [], i, j, others, fam, pred;
+    function looRefit(fitPts, evalSet) {
+      var miss = [], i, others, rest, curve, fam, pred;
       for (i = 0; i < evalSet.length; i++) {
+        rest = fitPts.filter(function (q) { return q.slug !== evalSet[i].slug; });
+        curve = fitCurve(rest.map(function (q) { return { tvl: q.tvl_usd, mcap: q.mcap_usd }; }));
         others = [];
-        for (j = 0; j < evalSet.length; j++) if (j !== i) others.push(evalSet[j]);
+        for (var j = 0; j < evalSet.length; j++) if (j !== i) others.push(evalSet[j]);
         fam = familyTable(others.map(function (q) { return { tvl: q.tvl_usd, mcap: q.mcap_usd, category: q.category || "(none)" }; }), curve);
         pred = Math.pow(10, curve.a + curve.b * log10(evalSet[i].tvl_usd)) * familyFactor(fam, evalSet[i].category) * Math.pow(growthTvlFactor(evalSet[i].change_7d), curve.b) * seasoningFactor(ageYears(evalSet[i].listed_at));
         miss.push(Math.max(pred / evalSet[i].mcap_usd, evalSet[i].mcap_usd / pred));
       }
       miss.sort(function (x, y) { return x - y; });
-      return { n: fitN, median: median(miss), meanAbsLog: meanOf(miss.map(function (m) { return log10(m); })) };
+      return { n: fitPts.length, median: median(miss), meanAbsLog: meanOf(miss.map(function (m) { return log10(m); })) };
     }
-    return { strict: looFixed(strictCurve, strictPts.length, all), keepAll: looFixed(keepCurve, all.length, all) };
+    return { strict: looRefit(strictPts, all), keepAll: looRefit(all, all) };
   }
 
   // Full build from a parsed snapshot object.
@@ -596,6 +602,8 @@
     validation.fitSet = compareFitSets(protocols);
     var siblingWords = tradedFirstWords(protocols);
     var siblingHalf = 0;
+    var namedChainWatchlist = 0, namedChainWatchlistHalf = 0;
+    var count1000 = { farm: 0, thin: 0, skip: 0 };
     var setAside = [];
     var rows = [];
     var i, p, reason, priced, plan;
@@ -614,9 +622,19 @@
       if (reason) { setAside.push({ slug: p.slug, name: p.name, tvl_usd: p.tvl_usd, category: p.category, chains: p.chains, reason: reason }); continue; }
       var sib = isSibling(p, siblingWords) ? 0.5 : 1.0;
       if (sib === 0.5) siblingHalf++;
+      if (watchSet[p.slug] && isNamedForChain(p)) {
+        namedChainWatchlist++;
+        if (sib === 0.5) namedChainWatchlistHalf++;
+      }
       priced = priceProtocol(p, curve, fam, sib);
       var farmChain = cheapestChain(p.chains);
       plan = farmPlan(p, priced, farmChain);
+      // The same verdict rule at a $1,000 cap, for the method page: the
+      // $1,000 counts are computed, not quoted from an earlier run.
+      var plan1000 = farmPlan(p, priced, farmChain, 1000);
+      if (plan1000.verdict === "Worth farming") count1000.farm++;
+      else if (plan1000.verdict === "Marginal") count1000.thin++;
+      else count1000.skip++;
       rows.push({
         slug: p.slug, name: p.name, category: p.category, chains: p.chains,
         farm_chain: farmChain,
@@ -655,6 +673,11 @@
       else if (rows[i].verdict === "Marginal") thinCount++;
       else skipCount++;
     }
+    // How crowded the 10% verdict line is: the median break-even odds
+    // and how many rows sit within two points of it.
+    var oddsSorted = rows.map(function (r) { return r.break_even_odds; }).sort(function (a, b) { return a - b; });
+    var oddsMedian = median(oddsSorted);
+    var oddsNearLine = rows.filter(function (r) { return Math.abs(r.break_even_odds - 0.10) <= 0.02; }).length;
     var famList = [];
     for (var cat in fam) famList.push({ category: cat, factor: fam[cat].factor, n: fam[cat].n });
     famList.sort(function (x, y) { return y.factor - x.factor; });
@@ -672,6 +695,11 @@
       watchlistCovered: rows.filter(function (r) { return r.watchlist; }).length,
       setAsideCount: setAside.length,
       siblingHalf: siblingHalf,
+      namedChainWatchlist: namedChainWatchlist,
+      namedChainWatchlistHalf: namedChainWatchlistHalf,
+      countsAt1000: count1000,
+      oddsMedian: oddsMedian,
+      oddsNearLine: oddsNearLine,
       fitSet: fitCounts,
       curve: { a: curve.a, b: curve.b, n: curve.n, per100m: Math.pow(10, curve.a + curve.b * 8) },
       families: famList,
