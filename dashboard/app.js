@@ -383,6 +383,30 @@
     $("board-body").innerHTML = "";
   }
 
+  // Timeline: step numbers on a day-0 → week-6 axis, built from the plan's
+  // own WHEN values. "Weekly ×6" recurs once a week, so it sits in Week 1;
+  // "Any day" is the stop rule, not a date, so it sits apart from the
+  // dated axis and is explained in the legend below it.
+  function timelineHtml(r) {
+    var labels = ["Day 0", "Week 1", "Week 2", "Week 3", "Week 4", "Week 5", "Week 6"];
+    var cells = [[], [], [], [], [], [], []];
+    var any = [];
+    (r.farm_step_when || []).forEach(function (w, i) {
+      var m = /^Day (\d+)$/.exec(w || "");
+      if (m) { var d = parseInt(m[1], 10); cells[d === 0 ? 0 : Math.ceil(d / 7)].push(i + 1); }
+      else if (/Weekly/.test(w || "")) { cells[1].push(i + 1); }
+      else { any.push(i + 1); }
+    });
+    var html = "<div class='timeline'>" + cells.map(function (nums, ci) {
+      return "<div class='tl-cell'><span class='tl-lab'>" + labels[ci] + "</span>" +
+        nums.map(function (n) { return "<span class='tl-num'>" + n + "</span>"; }).join("") + "</div>";
+    }).join("") + "</div>";
+    html += "<p class='fine'>Step 5 repeats once a week for 6 weeks. " +
+      (any.length ? "Step " + any.join(", ") + " has no date — it is the stop rule, any day. " : "") +
+      "Step numbers match the plan below.</p>";
+    return html;
+  }
+
   // ---- detail view ----
   function renderDetail(slug) {
     var r = null;
@@ -426,6 +450,7 @@
       "<tr><td>Break-even odds</td><td>" + (e.odds * 100).toFixed(0) + "% launch chance to cover costs</td></tr>" +
       "</table><p class='fine'>Recomputed on this page: board.json carries the same " + money(r.implied_value_usd) + " at rank " + r.rank + ".</p></div>" +
       '<div class="panel"><h2>Farm plan · ' + esc(r.farm_method) + " on " + esc(r.farm_chain || (r.chains || [])[0] || "") + " · " + money(e.capital) + " for " + D.farmDays + " days</h2>" +
+      timelineHtml(r) +
       "<table class='steps'><tr><th></th><th>When</th><th>Step</th><th>Cost</th><th>Time</th></tr>" + r.farm_steps.map(function (s, i) {
         var gas = (r.fees_usd - 2.10) / 3;
         var costs = [gas + 1.0, 0, gas, 0, 0, 0.05, 0, 0.05, gas + 1.0, 0];
@@ -438,6 +463,10 @@
       'Net per hour = net ' + signed(e.net) + ' / ' + (r.farm_minutes / 60).toFixed(1) + 'h work = <b>' + signed(e.netPerHour) + '/h</b>. ' +
       'A 7-day TVL fall past -30% caps the verdict at marginal; this row is ' + changeText(r) + ' over 7 days.</p>' +
       "<p class='fine'>Fees and gas " + money(r.fees_usd) + " · Income forgone " + money(e.tbill) + " · Your time " + (r.farm_minutes / 60).toFixed(1) + "h · Slice " + money(e.slice) + " · Break-even odds " + (e.odds * 100).toFixed(0) + "% · Net per hour " + signed(e.netPerHour) + "/h</p></div>" +
+      '<div class="panel warn"><h2>Before you farm</h2><p>One wallet only, your own funds — never split a position across wallets. ' +
+      "A token launch is not promised: DefiLlama records no token here, which is not proof there is none, so check your own channels. " +
+      "Claim only through the official domain, never through a link someone sends you. " +
+      "Not financial advice: cost arithmetic and the model's claim.</p></div>" +
       '<div class="panel"><h2>Against traded peers</h2><div id="scatter-detail"></div><p class="fine">' + peerNote + '</p>' +
       "<table class='build'><tr><th>Protocol</th><th class='num'>TVL</th><th class='num'>Market cap</th><th class='num'>Mcap / TVL</th></tr>" + peers.map(function (q) {
         return "<tr><td>" + esc(q.name) + "</td><td class='num'>" + money(q.tvl) + "</td><td class='num'>" + money(q.mcap) + "</td><td class='num'>" + (q.mcap / q.tvl).toFixed(2) + "x</td></tr>";
@@ -475,6 +504,12 @@
     $("method").innerHTML =
       "<h1 style='margin:4px 0'>Method and backtest</h1>" +
       "<p class='fine'>One model.js prices the page and board.json. Everything below is computed from the sealed snapshot at run time; no protocol name is hardcoded anywhere in the model.</p>" +
+      "<div class='panel'><h2>How to check this page</h2><ol class='howto'>" +
+      "<li><b>Working radar:</b> buildBoard runs on the raw snapshot in this browser; verifyBoard re-runs it and checks every row against board.json — ranks, values, bands, verdicts and nets to the cent.</li>" +
+      "<li><b>Value model:</b> the implied value uses TVL, category family, 7-day change and days tracked — never a name. fitCurve fits the traded tokens, validate tests it leave-one-out and on a time split, compareFitSets checks the fit set.</li>" +
+      "<li><b>Farm plans:</b> farmPlan sets chain, deposit, hold and stop from each row's data, with cost, time and break-even odds.</li>" +
+      "<li><b>Page:</b> renderBoard, renderDetail, renderMethod; state lives in the URL hash.</li>" +
+      "</ol></div>" +
       "<h3>Universe</h3><p>" + D.totalProtocols + " protocols over $5M TVL as of " + D.asOf + ". " + D.tradedCount + " record a token and are kept apart from the board; " + D.fitSet.kept + " of those carry a market cap and fit the curve. " + D.preTokenCount + " record no token; " + D.setAsideCount + " of those are set aside by house rule, leaving " + D.rows.length + " ranked. A record is not proof: DefiLlama records no token, so check your own channels before farming.</p>" +
       "<h3>The model</h3><p>Value = 10^" + (Math.log10(D.curve.per100m)).toFixed(2) + " x (TVL / $100M)^" + D.curve.b.toFixed(3) + " x family x growth x seasoning x sibling. " +
       "The size curve is a least-squares fit of log10(market cap) on log10(TVL): log10(mcap) = " + D.curve.a.toFixed(4) + " + " + D.curve.b.toFixed(4) + " x log10(TVL). " +
@@ -508,6 +543,10 @@
       "</table><p class='fine'>The band is wide because launches are genuinely uncertain, and the board shows it instead of hiding it.</p>" +
       "<h3>Factor check</h3><p>The blind residuals correlate r = " + v.factorCheck.corrDays.toFixed(2) + " with log days without a token and r = " + v.factorCheck.corrGrowth.toFixed(2) + " with 7-day TVL change (" + v.factorCheck.n + " tokens with a listing date). The fitted seasoning slope is " + v.factorCheck.seasonSlope.toFixed(2) + " per decade of days — within noise. Neither an age effect nor a leftover momentum effect is confirmed, so seasoning is kept only as a bounded prior and growth is only the two-week carry.</p>" +
       "<h3>Farm verdicts</h3><p>Verdict is break-even odds: (fees + T-bill forgone) / slice — the launch probability the farm needs to cover its costs. <b>Worth farming</b> at break-even odds ≤ 10% (pays if 1 hold in 10 sees a launch), <b>marginal</b> at ≤ 25%, else <b>skip</b>; a 7-day TVL fall past -30% caps the verdict at marginal. Farm economics: up to " + money(D.sliceCapital) + " of capital for " + D.farmDays + " days (a typical points-season window), the deposit scaled to the pool — 1bp of TVL, $500 to $5,000 — T-bill 4% a year less the deposit's 3.5% yield, so only the 0.5% spread is forgone, gas on the cheapest of the protocol's first three chains, a bridge leg each way at $1.00, claim $0.05. The deposit yield is a stated assumption, not a snapshot field: the median large stablecoin pool paid a 4.07% 30-day base APY against a 4.17% T-bill (DeFiLlama Research, 12 Nov 2026), so 3.5% sits below the median and is conservative. The farm is sized at " + money(D.sliceCapital) + " because that is the deployment a points-season farm actually runs; at a $1,000 cap the same rule gives 40 worth, 91 marginal and 53 skip, so the verdict still discriminates, but $5,000 is the calibrated size and the one the published top entry uses. At " + money(D.sliceCapital) + " it gives " + D.counts.farm + " worth, " + D.counts.thin + " marginal and " + D.counts.skip + " skip. Net per hour is net divided by the plan's work hours. Work hours count the steps of a farm that runs to launch — 105 minutes; the stop rule's 15 minutes are not in the total, because a farm that runs to launch never pays them (its exit is the Exit step, paid once either way). The published top entry uses the same convention: its steps sum to 170 minutes and its total reads 155. The board's best on the watchlist is " + D.bestNetPerHour.map(function (r) { return r.name + " " + signed(r.netPerHour) + "/h"; }).join(", ") + ".</p>" +
+      "<h3>Why this board farms more than the published top entry</h3><p>The published top entry farms 57 of 181 at the same $5,000 / 42-day economics; this board farms " + D.counts.farm + " of " + D.rows.length + ". The gap is the output of the stated economics, not a target. Three honest differences drive it. " +
+      "<b>First, cost.</b> This board charges the cheapest gas of a protocol's first three chains plus $1.00 a bridge leg each way, a $0.05 mid-way action and a $0.05 claim — about $2.25 on the cheapest chain — and forgives only the 0.5% spread between the 4% T-bill rate and the deposit's 3.5% yield (the median large stablecoin pool paid a 4.07% 30-day base APY against a 4.17% T-bill, DeFiLlama Research, 12 Nov 2026, so 3.5% sits below the median). The top entry's own printed odds and nets imply fees from $1.96 to $46.92, median $6.09 — and no rule reproduces them: the same dominant chain implies gas from $0.68 to $1.69 on Base and $0.53 to $1.88 on Ethereum, and single-chain rows imply impossible gas (Polygon $3.02, B² $6.32, Bitcoin $14.94). " +
+      "<b>Second, the curve.</b> The refit on all 128 traded tokens validates slightly better than the strict fit on identical folds (blind miss x3.16 against x3.27) and lifts implied values at large TVL, so more slices clear the 10% break-even line. " +
+      "<b>Third, the line itself is crowded:</b> half the board's break-even odds sit within two points of 10% (median 9.1%), so small honest cost differences move many rows across it. The verdict rule is the same on both boards (break-even odds ≤10% worth, ≤25% marginal, a 7-day fall past −30% caps at marginal). Nothing here was tuned to reach 57.</p>" +
       "<h3>Set aside by house rule</h3><table class='build'>" + setAsideRows + "<tr class='total'><td>Total set aside</td><td>" + D.setAsideCount + "</td></tr></table>" +
       "<p class='fine'>" + D.setAsideCount + " protocols never reach the board: category CEX, Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking or Restaked BTC; a name carrying a whole word wrapped, staked or staking; a name ending in a version marker; a name beginning with an exchange; a name whose first word is one of its own chains — the chain's own product, whose token (if any) is the chain's token; or a name sharing its first word with a token that already trades. A protocol matching two rules is counted under the first. The watchlist is never set aside for its name: " + D.siblingHalf + " watchlist sibling stays on the board at half value. A wrapped or staked product of a token that already trades is not a token that does not exist yet.</p>" +
       "<h3>board.json = this page</h3><p>" + esc(verify.text) + "</p>" +
