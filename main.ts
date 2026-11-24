@@ -162,7 +162,7 @@ function main(): void {
   const built = RadarModel.buildBoard(snapshot);
 
   mkdirSync(outDir, { recursive: true });
-  const board = { as_of: built.asOf, model: "launch-radar: comps-fitted size curve, blind-tested", rows: built.rows };
+  const board = { as_of: built.asOf, model: "launch-radar: comps-fitted size curve, logistic launch odds from peers, blind-tested", rows: built.rows };
   writeFileSync(join(outDir, "board.json"), JSON.stringify(board, null, 2) + "\n");
   const dataScript = "window.RADAR_DATA = " + JSON.stringify(built) + ";\n" +
     "window.RADAR_SNAPSHOT = " + JSON.stringify(snapshot) + ";\n";

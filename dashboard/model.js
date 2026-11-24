@@ -447,6 +447,7 @@
     var oldPts = pts.filter(function (q) { return q.listed_at && q.listed_at < "2024-01-01"; });
     var newPts = pts.filter(function (q) { return q.listed_at && q.listed_at >= "2024-01-01"; });
     var tsCurve = null, tsFlat = null;
+    var tsPred = [], tsAct = [];
     if (oldPts.length > 0 && newPts.length > 0) {
       var c2 = fitCurve(oldPts);
       var f2 = familyTable(oldPts.map(function (q) { return { tvl: q.tvl, mcap: q.mcap, category: q.category }; }), c2);
@@ -454,6 +455,7 @@
       tsCurve = []; tsFlat = [];
       for (i = 0; i < newPts.length; i++) {
         var pr = Math.pow(10, c2.a + c2.b * log10(newPts[i].tvl)) * familyFactor(f2, newPts[i].category) * Math.pow(growthTvlFactor(newPts[i].change_7d), c2.b) * seasoningFactor(ageYears(newPts[i].listed_at));
+        tsPred.push(pr); tsAct.push(newPts[i].mcap);
         tsCurve.push(Math.max(pr / newPts[i].mcap, newPts[i].mcap / pr));
         var fpr = median(flatTrain) * newPts[i].tvl;
         tsFlat.push(Math.max(fpr / newPts[i].mcap, newPts[i].mcap / fpr));
@@ -499,6 +501,82 @@
     function meanAbsLogOf(miss) {
       return meanOf(miss.map(function (m) { return log10(m); }));
     }
+    // Rolling walk-forward for the value model (v13 T1): traded tokens
+    // with a listing date, sorted by listed_at, in quartiles; the train
+    // set expands by one quarter at a time and the test set is the next
+    // quarter (the last window takes the remainder). Pooled over the
+    // test rows, same four variants as the LOO ablation. The window
+    // step is floor(n/4) per quarter, so the last window takes the
+    // leftover rows — v13 measured pooled x2.973 / 50.0% here.
+    var wfRolling = null;
+    (function () {
+      var dated = pts.filter(function (q) { return q.listed_at; }).sort(function (a, b) { return a.listed_at < b.listed_at ? -1 : 1; });
+      if (dated.length < 8) return;
+      function wfPredict(variant, train, p) {
+        var c = fitCurve(train);
+        if (variant === "flat") {
+          var ratios = train.map(function (q) { return q.mcap / q.tvl; }).sort(function (x, y) { return x - y; });
+          return median(ratios) * p.tvl;
+        }
+        var pr2 = Math.pow(10, c.a + c.b * log10(p.tvl));
+        if (variant === "curve") return pr2;
+        var fm = familyTable(train.map(function (q) { return { tvl: q.tvl, mcap: q.mcap, category: q.category }; }), c);
+        pr2 *= familyFactor(fm, p.category);
+        if (variant === "curve+family") return pr2;
+        return pr2 * Math.pow(growthTvlFactor(p.change_7d), c.b) * seasoningFactor(ageYears(p.listed_at));
+      }
+      var variants = ["flat", "curve", "curve+family", "curve+family+growth"];
+      wfRolling = {};
+      variants.forEach(function (variant) {
+        var pred = [], act = [], q, step = Math.floor(dated.length / 4);
+        for (q = 1; q <= 3; q++) {
+          var n = step * q;
+          var train = dated.slice(0, n);
+          var test = dated.slice(n, q === 3 ? dated.length : n + step);
+          test.forEach(function (p) { pred.push(wfPredict(variant, train, p)); act.push(p.mcap); });
+        }
+        var miss = pred.map(function (pr2, idx) { return Math.max(pr2 / act[idx], act[idx] / pr2); });
+        miss.sort(function (x, y) { return x - y; });
+        var abslog = pred.map(function (pr2, idx) { return Math.abs(log10(act[idx] / pr2)); });
+        wfRolling[variant] = {
+          median: median(miss), meanAbsLog: meanOf(abslog),
+          within3: within3(miss), spearman: spearman(pred, act), n: pred.length,
+        };
+      });
+    })();
+    // Is the printed range honest? Fraction of actual caps inside the
+    // P25–P75 and P10–P90 bands. LOO uses the bands printed on the
+    // board (quantiles of the LOO residuals themselves); walk-forward
+    // uses bands fitted on the training tokens only, so the test
+    // tokens never touch the band that judges them.
+    function covFrac(pred, act, lo, hi) {
+      var c = 0, k;
+      for (k = 0; k < pred.length; k++) if (act[k] >= pred[k] * lo && act[k] <= pred[k] * hi) c++;
+      return pred.length ? c / pred.length : 0;
+    }
+    var p10M = Math.pow(10, quantile(signedSorted, 0.1));
+    var p25M = Math.pow(10, quantile(signedSorted, 0.25));
+    var p50M = Math.pow(10, quantile(signedSorted, 0.5));
+    var p75M = Math.pow(10, quantile(signedSorted, 0.75));
+    var p90M = Math.pow(10, quantile(signedSorted, 0.9));
+    var covLoo = { p25_75: covFrac(looPred, looAct, p25M, p75M), p10_90: covFrac(looPred, looAct, p10M, p90M) };
+    var covWf = { p25_75: 0, p10_90: 0 };
+    if (oldPts.length > 0 && newPts.length > 0) {
+      var oldSigned = [];
+      for (i = 0; i < oldPts.length; i++) {
+        var oo = [];
+        for (j = 0; j < oldPts.length; j++) if (j !== i) oo.push(oldPts[j]);
+        var oc = fitCurve(oo);
+        var of = familyTable(oo.map(function (q) { return { tvl: q.tvl, mcap: q.mcap, category: q.category }; }), oc);
+        var op = Math.pow(10, oc.a + oc.b * log10(oldPts[i].tvl)) * familyFactor(of, oldPts[i].category) * Math.pow(growthTvlFactor(oldPts[i].change_7d), oc.b) * seasoningFactor(ageYears(oldPts[i].listed_at));
+        oldSigned.push(log10(oldPts[i].mcap / op));
+      }
+      oldSigned.sort(function (x, y) { return x - y; });
+      covWf = {
+        p25_75: covFrac(tsPred, tsAct, Math.pow(10, quantile(oldSigned, 0.25)), Math.pow(10, quantile(oldSigned, 0.75))),
+        p10_90: covFrac(tsPred, tsAct, Math.pow(10, quantile(oldSigned, 0.1)), Math.pow(10, quantile(oldSigned, 0.9))),
+      };
+    }
     return {
       n: pts.length,
       looMedian: median(looMiss), flatMedian: median(flatMiss),
@@ -510,13 +588,15 @@
       looSpearman: spearman(looPred, looAct), flatSpearman: spearman(flatPred, flatAct),
       looCurveSpearman: spearman(looCurvePred, looCurveAct), looFamSpearman: spearman(looFamPred, looFamAct),
       eightFold: eightFold,
+      wfRolling: wfRolling,
+      coverage: { loo: covLoo, wf: covWf },
       band50: Math.pow(10, quantile(absLog, 0.5)),
       band80: Math.pow(10, quantile(absLog, 0.8)),
-      p10Mult: Math.pow(10, quantile(signedSorted, 0.1)),
-      p25Mult: Math.pow(10, quantile(signedSorted, 0.25)),
-      p50Mult: Math.pow(10, quantile(signedSorted, 0.5)),
-      p75Mult: Math.pow(10, quantile(signedSorted, 0.75)),
-      p90Mult: Math.pow(10, quantile(signedSorted, 0.9)),
+      p10Mult: p10M,
+      p25Mult: p25M,
+      p50Mult: p50M,
+      p75Mult: p75M,
+      p90Mult: p90M,
       timeTrain: oldPts.length, timeTest: newPts.length,
       timeCurveMedian: tsCurve ? median(tsCurve) : null,
       timeFlatMedian: tsFlat ? median(tsFlat) : null,
@@ -579,8 +659,205 @@
     return { strict: looRefit(strictPts, all), keepAll: looRefit(all, all) };
   }
 
-  // Full build from a parsed snapshot object.
-  function buildBoard(snapshot) {
+  // ---- launch odds: logistic current-status regression (v18) ----
+  // P(a peer like this one has recorded a token), fitted on the dated
+  // protocols in launchable categories. A current-status probability,
+  // not a time-to-event forecast: it rises with age because older peers
+  // are more likely to have launched already. Ported from the harness
+  // in /tmp/tr-v18/odds-harness2.cjs — same peer set, features, ridge
+  // lambda = 2 and IRLS solver; do not re-derive. The solver skips zero
+  // features (a family dummy is 1 for one category and 0 for the rest),
+  // which changes no sum: adding 0.0 never changes a total, and
+  // w*x[j]*x[k] is multiplied in the same order.
+  var ODDS_LAMBDA = 2;
+  function oddsHasToken(p) { return p.gecko_id !== null || p.symbol !== null; }
+  function oddsPeers(protocols) {
+    var peers = [], i;
+    for (i = 0; i < protocols.length; i++) {
+      var p = protocols[i];
+      if (p.listed_at && !EXCLUDED_CATEGORIES[p.category || ""]) peers.push(p);
+    }
+    return peers;
+  }
+  function oddsContext(peers) {
+    var cats = {}, i, c;
+    for (i = 0; i < peers.length; i++) { c = peers[i].category || "(none)"; cats[c] = (cats[c] || 0) + 1; }
+    var famCats = [];
+    for (c in cats) if (cats[c] >= 3) famCats.push(c);
+    famCats.sort();
+    var meanLogTVL = 0;
+    for (i = 0; i < peers.length; i++) meanLogTVL += log10(peers[i].tvl_usd);
+    meanLogTVL = peers.length ? meanLogTVL / peers.length : 0;
+    // Deterministic placebo: the 7-day growth of another row (7 places
+    // ahead in slug order, wrapped). It must not help — if it does, the
+    // ablation is reading noise, not signal.
+    var bySlug = peers.slice().sort(function (a, b) { return a.slug < b.slug ? -1 : 1; });
+    var controlGrowth = {};
+    for (i = 0; i < bySlug.length; i++) controlGrowth[bySlug[i].slug] = ((bySlug[(i + 7) % bySlug.length].change_7d || 0) / 100);
+    return { famCats: famCats, meanLogTVL: meanLogTVL, controlGrowth: controlGrowth };
+  }
+  function oddsFeatures(p, spec, ctx) {
+    var v = [1, ageYears(p.listed_at)], i;
+    if (spec.indexOf("fam") >= 0) {
+      for (i = 0; i < ctx.famCats.length; i++) v.push(p.category === ctx.famCats[i] ? 1 : 0);
+    }
+    if (spec.indexOf("size") >= 0) v.push(log10(p.tvl_usd) - ctx.meanLogTVL);
+    if (spec.indexOf("growth") >= 0) v.push((p.change_7d || 0) / 100);
+    if (spec.indexOf("chain") >= 0) v.push(Math.log((p.chains || []).length || 1));
+    if (spec.indexOf("control") >= 0) v.push(ctx.controlGrowth[p.slug] || 0);
+    return v;
+  }
+  function fitLogistic(rows, lambda) {
+    var d = rows[0].x.length, beta = new Array(d).fill(0), iter, i, j, k;
+    for (iter = 0; iter < 60; iter++) {
+      var g = new Array(d).fill(0);
+      var H = [];
+      for (j = 0; j < d; j++) H.push(new Array(d).fill(0));
+      for (i = 0; i < rows.length; i++) {
+        var r = rows[i], z = 0;
+        for (j = 0; j < d; j++) if (r.x[j] !== 0) z += beta[j] * r.x[j];
+        var p = 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))));
+        var w = Math.max(p * (1 - p), 1e-6);
+        var resid = r.y - p;
+        for (j = 0; j < d; j++) {
+          if (r.x[j] === 0) continue;
+          g[j] += resid * r.x[j];
+          var wxj = w * r.x[j];
+          for (k = 0; k < d; k++) {
+            if (r.x[k] === 0) continue;
+            H[j][k] += wxj * r.x[k];
+          }
+        }
+      }
+      for (j = 1; j < d; j++) { H[j][j] += lambda; g[j] -= lambda * beta[j]; }
+      var n = d, A = H.map(function (row, idx) { return row.concat(g[idx]); });
+      for (var c = 0; c < n; c++) {
+        var piv = c;
+        for (var rr = c + 1; rr < n; rr++) if (Math.abs(A[rr][c]) > Math.abs(A[piv][c])) piv = rr;
+        var tmp = A[c]; A[c] = A[piv]; A[piv] = tmp;
+        if (Math.abs(A[c][c]) < 1e-12) continue;
+        for (rr = 0; rr < n; rr++) {
+          if (rr === c) continue;
+          var f = A[rr][c] / A[c][c];
+          for (k = c; k <= n; k++) A[rr][k] -= f * A[c][k];
+        }
+      }
+      var maxStep = 0;
+      for (j = 0; j < d; j++) {
+        var delta = A[j][n] / (Math.abs(A[j][j]) < 1e-12 ? 1 : A[j][j]);
+        beta[j] += delta;
+        maxStep = Math.max(maxStep, Math.abs(delta));
+      }
+      if (maxStep < 1e-8) break;
+    }
+    return beta;
+  }
+  function predictLogistic(beta, x) {
+    var z = 0, j;
+    for (j = 0; j < beta.length; j++) z += beta[j] * x[j];
+    return 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))));
+  }
+  // Board odds: the fitted probability, clamped to [0.01, 0.99] so a
+  // single extreme row cannot print a 0% or 100% launch chance. The
+  // validation below scores the raw probability, exactly as the
+  // harness does, so the clamp never touches a reported Brier.
+  function predictOdds(beta, x) {
+    return clamp(predictLogistic(beta, x), 0.01, 0.99);
+  }
+  function oddsModel(protocols) {
+    var peers = oddsPeers(protocols);
+    var ctx = oddsContext(peers);
+    var rows = peers.map(function (p) { return { x: oddsFeatures(p, ["fam", "size", "growth"], ctx), y: oddsHasToken(p) ? 1 : 0, p: p }; });
+    var beta = fitLogistic(rows, ODDS_LAMBDA);
+    var baseRate = 0, i;
+    for (i = 0; i < peers.length; i++) if (oddsHasToken(peers[i])) baseRate++;
+    baseRate = peers.length ? baseRate / peers.length : 0;
+    return { peers: peers, ctx: ctx, beta: beta, baseRate: baseRate };
+  }
+  function oddsScore(rows, beta) {
+    var b = 0, c = 0, i;
+    for (i = 0; i < rows.length; i++) {
+      var p = predictLogistic(beta, rows[i].x);
+      b += (p - rows[i].y) * (p - rows[i].y);
+      if ((p >= 0.5 ? 1 : 0) === rows[i].y) c++;
+    }
+    return { brier: rows.length ? b / rows.length : 0, acc: rows.length ? c / rows.length : 0 };
+  }
+  // Leave-one-out, rolling walk-forward and the 2024-07-15 split for
+  // each ablation spec. A term is kept only if it lowers the Brier in
+  // BOTH leave-one-out and walk-forward. The full validation is slow
+  // (leave-one-out refits the logistic model once per peer per spec),
+  // so buildBoard skips it when opts.skipOddsValidation is set — the
+  // browser re-run in verifyBoard only needs the rows, which come from
+  // the single full fit in oddsModel. main.ts runs the full validation
+  // at build time and writes it into data.js.
+  function validateOdds(model) {
+    var peers = model.peers, ctx = model.ctx;
+    var dated = peers.slice().sort(function (a, b) { return a.listed_at < b.listed_at ? -1 : 1; });
+    var SPECS = [
+      ["age", []],
+      ["age+fam", ["fam"]],
+      ["age+fam+size", ["fam", "size"]],
+      ["age+fam+size+growth", ["fam", "size", "growth"]],
+      ["+chain", ["fam", "size", "growth", "chain"]],
+      ["+control", ["fam", "size", "growth", "control"]],
+    ];
+    var ablation = [], prev = null, s, i, q, j;
+    for (s = 0; s < SPECS.length; s++) {
+      var name = SPECS[s][0], spec = SPECS[s][1];
+      var rows = peers.map(function (p) { return { x: oddsFeatures(p, spec, ctx), y: oddsHasToken(p) ? 1 : 0, p: p }; });
+      var lb = 0, lc = 0;
+      for (i = 0; i < rows.length; i++) {
+        var rest = [];
+        for (j = 0; j < rows.length; j++) if (j !== i) rest.push(rows[j]);
+        var beta = fitLogistic(rest, ODDS_LAMBDA);
+        var pr = predictLogistic(beta, rows[i].x);
+        lb += (pr - rows[i].y) * (pr - rows[i].y);
+        if ((pr >= 0.5 ? 1 : 0) === rows[i].y) lc++;
+      }
+      var loo = { brier: lb / rows.length, acc: lc / rows.length };
+      var wb = 0, wc = 0, wn = 0;
+      for (q = 1; q <= 3; q++) {
+        var n = Math.floor(dated.length * q / 4);
+        var tr = dated.slice(0, n).map(function (p) { return { x: oddsFeatures(p, spec, ctx), y: oddsHasToken(p) ? 1 : 0, p: p }; });
+        var te = dated.slice(n, n + Math.floor(dated.length / 4)).map(function (p) { return { x: oddsFeatures(p, spec, ctx), y: oddsHasToken(p) ? 1 : 0, p: p }; });
+        var bq = fitLogistic(tr, ODDS_LAMBDA);
+        var sq = oddsScore(te, bq);
+        wb += sq.brier * te.length; wc += sq.acc * te.length; wn += te.length;
+      }
+      var wfPool = { brier: wb / wn, acc: wc / wn };
+      var tr15 = rows.filter(function (r) { return r.p.listed_at < "2024-07-15"; });
+      var te15 = rows.filter(function (r) { return r.p.listed_at >= "2024-07-15"; });
+      var b15 = fitLogistic(tr15, ODDS_LAMBDA);
+      var wfSplit = oddsScore(te15, b15);
+      var kept = null;
+      if (prev) kept = loo.brier < prev.loo.brier && wfPool.brier < prev.wfPool.brier;
+      ablation.push({ spec: name, looBrier: loo.brier, looAcc: loo.acc, wfBrier: wfPool.brier, wfAcc: wfPool.acc, wf15Brier: wfSplit.brier, wf15Acc: wfSplit.acc, kept: kept });
+      // The comparison baseline is the last KEPT spec, not the last
+      // tried one: +chain was rejected, so +control is judged against
+      // the full model, not against the rejected chain spec. Otherwise
+      // a placebo could look "kept" merely by beating a rejected spec.
+      if (kept !== false) prev = { loo: loo, wfPool: wfPool };
+    }
+    var full = ablation[3];
+    var coef = { intercept: model.beta[0], age: model.beta[1], logTVL: model.beta[1 + ctx.famCats.length + 1], growth: model.beta[2 + ctx.famCats.length + 1], family: {} };
+    for (i = 0; i < ctx.famCats.length; i++) coef.family[ctx.famCats[i]] = model.beta[2 + i];
+    var baseRate = model.baseRate;
+    return {
+      peerCount: peers.length, baseRate: baseRate,
+      baseBrier: baseRate * (1 - baseRate), baseAcc: Math.max(baseRate, 1 - baseRate),
+      loo: { brier: full.looBrier, acc: full.looAcc },
+      wfPool: { brier: full.wfBrier, acc: full.wfAcc },
+      wfSplit: { brier: full.wf15Brier, acc: full.wf15Acc },
+      ablation: ablation, coefficients: coef,
+    };
+  }
+
+  // Full build from a parsed snapshot object. opts.skipOddsValidation
+  // skips only the slow odds ablation (leave-one-out refits); the rows
+  // still come from the single full odds fit, so the board is identical
+  // either way. main.ts runs the full validation at build time.
+  function buildBoard(snapshot, opts) {
     var protocols = snapshot.protocols || [];
     var watchlist = snapshot.watchlist || [];
     var watchSet = {};
@@ -599,6 +876,8 @@
     var curve = fitCurve(traded.map(function (p) { return { tvl: p.tvl_usd, mcap: p.mcap_usd }; }));
     var fam = familyTable(traded.map(function (p) { return { tvl: p.tvl_usd, mcap: p.mcap_usd, category: p.category || "(none)" }; }), curve);
     var validation = validate(traded);
+    var oddsM = oddsModel(protocols);
+    var oddsVal = (opts && opts.skipOddsValidation) ? null : validateOdds(oddsM);
     validation.fitSet = compareFitSets(protocols);
     var siblingWords = tradedFirstWords(protocols);
     var siblingHalf = 0;
@@ -627,11 +906,19 @@
         if (sib === 0.5) namedChainWatchlistHalf++;
       }
       priced = priceProtocol(p, curve, fam, sib);
+      // Launch odds discount the value-if-launches: the board shows
+      // what a launch is worth AND how likely it is. The farm plan
+      // runs on the discounted value — a farm cannot spend a launch
+      // that never happens.
+      var oddsP = predictOdds(oddsM.beta, oddsFeatures(p, ["fam", "size", "growth"], oddsM.ctx));
+      var ifLaunches = Math.round(priced.implied);
+      var implied = Math.round(ifLaunches * oddsP);
+      var discounted = { implied: implied };
       var farmChain = cheapestChain(p.chains);
-      plan = farmPlan(p, priced, farmChain);
+      plan = farmPlan(p, discounted, farmChain);
       // The same verdict rule at a $1,000 cap, for the method page: the
       // $1,000 counts are computed, not quoted from an earlier run.
-      var plan1000 = farmPlan(p, priced, farmChain, 1000);
+      var plan1000 = farmPlan(p, discounted, farmChain, 1000);
       if (plan1000.verdict === "Worth farming") count1000.farm++;
       else if (plan1000.verdict === "Marginal") count1000.thin++;
       else count1000.skip++;
@@ -640,14 +927,16 @@
         farm_chain: farmChain,
         tvl_usd: p.tvl_usd, change_7d: p.change_7d, listed_at: p.listed_at,
         watchlist: !!watchSet[p.slug],
-        implied_value_usd: Math.round(priced.implied),
+        implied_value_usd: implied,
+        odds: Math.round(oddsP * 100) / 100,
+        implied_if_launches_usd: ifLaunches,
         base_usd: priced.base, family_factor: priced.family,
         growth_factor: priced.growth, seasoning_factor: priced.seasoning,
         sibling_factor: priced.sibling, age_years: priced.ageYears,
-        p10_usd: Math.round(priced.implied * validation.p10Mult),
-        p25_usd: Math.round(priced.implied * validation.p25Mult),
-        p75_usd: Math.round(priced.implied * validation.p75Mult),
-        p90_usd: Math.round(priced.implied * validation.p90Mult),
+        p10_usd: Math.round(implied * validation.p10Mult),
+        p25_usd: Math.round(implied * validation.p25Mult),
+        p75_usd: Math.round(implied * validation.p75Mult),
+        p90_usd: Math.round(implied * validation.p90Mult),
         slice_usd: plan.slice, fees_usd: plan.fees, tbill_usd: plan.tbill,
         net_usd: plan.net, verdict: plan.verdict, farm_method: plan.method,
         farm_capital_usd: plan.capital,
@@ -686,6 +975,9 @@
     var bestNetPerHour = rows.filter(function (r) { return r.watchlist; }).slice()
       .sort(function (a, b) { return b.net_per_hour_usd - a.net_per_hour_usd; }).slice(0, 3)
       .map(function (r) { return { name: r.name, netPerHour: r.net_per_hour_usd, net: r.net_usd }; });
+    var totalImplied = 0, totalIfLaunches = 0, launchOdds = [];
+    for (i = 0; i < rows.length; i++) { totalImplied += rows[i].implied_value_usd; totalIfLaunches += rows[i].implied_if_launches_usd; launchOdds.push(rows[i].odds); }
+    launchOdds.sort(function (a, b) { return a - b; });
     return {
       asOf: snapshot.as_of || AS_OF,
       totalProtocols: protocols.length,
@@ -700,6 +992,11 @@
       countsAt1000: count1000,
       oddsMedian: oddsMedian,
       oddsNearLine: oddsNearLine,
+      odds: oddsVal,
+      oddsCoverage: validation.coverage,
+      launchOddsMedian: median(launchOdds),
+      totalImpliedUsd: totalImplied,
+      totalIfLaunchesUsd: totalIfLaunches,
       fitSet: fitCounts,
       curve: { a: curve.a, b: curve.b, n: curve.n, per100m: Math.pow(10, curve.a + curve.b * 8) },
       families: famList,
@@ -729,6 +1026,10 @@
     setAsideReason: setAsideReason, gasFor: gasFor, cheapestChain: cheapestChain,
     methodFor: methodFor, meanOf: meanOf, spearman: spearman,
     farmPlan: farmPlan, validate: validate, compareFitSets: compareFitSets, buildBoard: buildBoard,
+    oddsModel: oddsModel, validateOdds: validateOdds, fitLogistic: fitLogistic,
+    predictLogistic: predictLogistic, predictOdds: predictOdds,
+    oddsPeers: oddsPeers, oddsFeatures: oddsFeatures, oddsHasToken: oddsHasToken,
+    ODDS_LAMBDA: ODDS_LAMBDA,
     fmtMoney: fmtMoney, fmtSigned: fmtSigned,
     SLICE_CAPITAL: SLICE_CAPITAL, AIRDROP_SHARE: AIRDROP_SHARE,
     TBILL_YEAR: TBILL_YEAR, DEPOSIT_YIELD_YEAR: DEPOSIT_YIELD_YEAR,

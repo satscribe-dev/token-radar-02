@@ -84,7 +84,10 @@
       out.text = "board.json = this page — no snapshot embedded, re-run unavailable";
     } else {
       var rebuilt;
-      try { rebuilt = M.buildBoard(window.RADAR_SNAPSHOT); } catch (e) { rebuilt = null; }
+      // The re-run skips only the slow odds ablation (leave-one-out
+      // refits); the rows come from the single full odds fit either
+      // way, so the comparison is exact and the page stays fast.
+      try { rebuilt = M.buildBoard(window.RADAR_SNAPSHOT, { skipOddsValidation: true }); } catch (e) { rebuilt = null; }
       if (!rebuilt) {
         out.text = "board.json = this page — re-run failed in this browser";
       } else {
@@ -166,15 +169,17 @@
     $("badge-watch").textContent = "Watchlist " + D.watchlistCovered + "/" + D.watchlistCount + " on board";
     $("badge-page").textContent = "Page = board.json " + D.rows.length + "/" + D.rows.length + " rows";
     $("hero-title").textContent = D.rows.length + " protocols record no token. Here is what each launch would be worth, and what farming it costs.";
-    $("hero-text").textContent = "Each value is read off a curve fitted to the " + D.curve.n + " tokens that already trade, then adjusted for family, for 7-day TVL growth carried two weeks forward, and for days tracked — a bounded prior that discounts young protocols up to 40%. No name is hand-picked. Every row has a farm plan with a dollar cost and minutes per step, netted against the T-bill yield less the deposit's own yield: only the 0.5% spread is forgone, because the deposit earns while it farms.";
+    $("hero-text").textContent = "Each value is read off a curve fitted to the " + D.curve.n + " tokens that already trade, adjusted for family, 7-day TVL growth carried two weeks forward, and days tracked, then discounted by launch odds — the chance a peer like it has recorded a token, fitted on " + D.odds.peerCount + " dated peers. No name is hand-picked. Every row has a farm plan with a dollar cost and minutes per step, netted against the T-bill yield less the deposit's own yield: only the 0.5% spread is forgone, because the deposit earns while it farms.";
     var st = $("hero-stats");
+    var od = D.odds, oc = D.oddsCoverage;
+    var keptTerms = od.ablation.filter(function (a) { return a.kept; }).length;
     st.innerHTML =
-      '<div class="stat"><b>' + D.rows.length + '</b><span>ranked, no token</span></div>' +
-      '<div class="stat"><b>' + D.tradedCount + '</b><span>token trades, kept apart</span></div>' +
-      '<div class="stat"><b>' + D.setAsideCount + '</b><span>set aside by house rule</span></div>' +
-      '<div class="stat"><b class="g">' + D.counts.farm + '</b><span>worth farming at $5.0K</span></div>' +
-      '<div class="stat"><b class="y">' + D.counts.thin + '</b><span>marginal</span></div>' +
-      '<div class="stat"><b class="r">' + D.counts.skip + '</b><span>skip at $5.0K</span></div>';
+      '<div class="stat"><b>' + D.rows.length + '</b><span>ranked · watchlist ' + D.watchlistCovered + '/' + D.watchlistCount + '</span></div>' +
+      '<div class="stat"><b>×' + D.validation.looMedian.toFixed(2) + '</b><span>blind miss LOO vs ×' + D.validation.flatMedian.toFixed(2) + ' flat</span></div>' +
+      '<div class="stat"><b>' + Math.round(oc.loo.p25_75 * 100) + '% / ' + Math.round(oc.loo.p10_90 * 100) + '%</b><span>printed range holds, LOO P25–P75 / P10–P90</span></div>' +
+      '<div class="stat"><b>' + od.loo.brier.toFixed(3) + '</b><span>launch-odds Brier LOO vs ' + od.baseBrier.toFixed(3) + ' base · ' + (od.loo.acc * 100).toFixed(1) + '% vs ' + (od.baseAcc * 100).toFixed(1) + '%</span></div>' +
+      '<div class="stat"><b>' + keptTerms + '/3</b><span>terms pass both tests · chain + control rejected</span></div>' +
+      '<div class="stat"><b class="g">' + D.counts.farm + '</b><span>worth farming of ' + D.rows.length + '</span></div>';
     var per100 = D.curve.per100m;
     $("formula").textContent = "value = 10^" + (Math.log10(per100)).toFixed(2) + " x (TVL/$100M)^" + D.curve.b.toFixed(3) + " x family x growth\nx seasoning x sibling";
     var v = D.validation;
@@ -283,6 +288,8 @@
       if (k === "tvl") return r.tvl_usd;
       if (k === "change") return r.change_7d === null ? -999 : r.change_7d;
       if (k === "age") return r.age_years;
+      if (k === "launchodds") return r.odds;
+      if (k === "iflaunches") return r.implied_if_launches_usd;
       if (k === "implied") return r.implied_value_usd;
       if (k === "slice") return econ(r).slice;
       if (k === "net") return econ(r).net;
@@ -340,7 +347,9 @@
         "<td class='num'>" + r.rank + "</td>" +
         "<td><a href='?view=detail&slug=" + encodeURIComponent(r.slug) + "' class='proto'>" + esc(r.name) + "</a>" + tags +
         "<small>" + esc(r.category || "—") + " · " + esc((r.chains || []).join(", ")) + "</small></td>" +
-        "<td class='num'>" + money(r.implied_value_usd) + "<br><span class='fine'>" + money(r.p10_usd) + " – " + money(r.p90_usd) + "</span>" +
+        "<td class='num'>" + Math.round(r.odds * 100) + "%</td>" +
+        "<td class='num'>" + money(r.implied_if_launches_usd) + "</td>" +
+        "<td class='num'>" + money(r.implied_value_usd) + "<br><span class='fine'>" + money(r.p25_usd) + " – " + money(r.p75_usd) + "</span>" +
         "<span class='rangebar'><i style='left:0;width:100%'></i><b style='left:" + tick.toFixed(0) + "%'></b></span></td>" +
         "<td class='num'>" + money(r.tvl_usd) + "</td>" +
         "<td class='num'>" + changeText(r) + "</td>" +
@@ -444,6 +453,8 @@
       "<tr><td>Growth ×" + r.growth_factor.toFixed(2) + "</td><td>" + changeText(r) + " / 7d, carried 2 wks</td></tr>" +
       "<tr><td>Seasoning ×" + r.seasoning_factor.toFixed(2) + "</td><td>" + (r.seasoning_factor >= 0.99 ? "tracked " + ageText(r) + " — no discount" : "young protocol — discounted " + Math.round((1 - r.seasoning_factor) * 100) + "% by a bounded prior") + "</td></tr>" +
       "<tr><td>Sibling ×" + r.sibling_factor.toFixed(2) + "</td><td>" + (r.sibling_factor < 1 ? "shares a first word with a traded token — half value" : "no adjustment") + "</td></tr>" +
+      "<tr><td>If it launches</td><td>" + money(r.implied_if_launches_usd) + "</td></tr>" +
+      "<tr><td>Launch odds ×" + r.odds.toFixed(2) + "</td><td>chance a peer like this has a token</td></tr>" +
       '<tr class="total"><td>Implied value</td><td>' + money(r.implied_value_usd) + "</td></tr>" +
       "<tr><td>Blind range, P10 to P90</td><td>" + money(r.p10_usd) + " to " + money(r.p90_usd) + "</td></tr>" +
       "<tr><td>Blind range, P25 to P75</td><td>" + money(r.p25_usd) + " to " + money(r.p75_usd) + "</td></tr>" +
@@ -493,8 +504,8 @@
     var famRows = D.families.map(function (f) {
       return "<tr><td>" + esc(f.category) + "</td><td>" + f.n + " tokens</td><td>x" + f.factor.toFixed(2) + "</td></tr>";
     }).join("");
-    function ablationRow(label, med, meanAbs, w3, sp) {
-      return "<tr><td>" + label + "</td><td>x" + med.toFixed(2) + "</td><td>" + meanAbs.toFixed(3) + "</td><td>" + pct(w3) + "</td><td>" + sp.toFixed(2) + "</td></tr>";
+    function ablationRow(label, med, meanAbs, w3, sp, wf) {
+      return "<tr><td>" + label + "</td><td>x" + med.toFixed(2) + "</td><td>" + meanAbs.toFixed(3) + "</td><td>" + pct(w3) + "</td><td>" + sp.toFixed(2) + "</td>" + (wf === undefined ? "" : "<td>x" + wf.toFixed(2) + "</td>") + "</tr>";
     }
     var ef = v.eightFold;
     var setAsideRows = Object.keys(D.setAsideByReason).sort(function (a, b) { return D.setAsideByReason[b] - D.setAsideByReason[a]; }).map(function (reason) {
@@ -519,12 +530,13 @@
       "<p>Seasoning is a bounded prior: 1 - 0.4 * e^(-days/240), so a protocol tracked 0 days is valued at 0.60, one tracked a year at about 0.91, and one tracked three years at 0.99. The snapshot cannot confirm an age effect (see the factor check below), so seasoning is stated as a prior, not a finding — it moves the median blind miss by about 0.05x (x3.25 without it, x3.20 with it) and mean |log miss| by less than 0.01. " +
       "Sibling is 0.50 for a watchlist protocol that shares its first word with a traded token, and 1.00 otherwise.</p>" +
       "<h3>Ablation: what each ingredient adds (leave-one-out, " + v.n + " tokens)</h3>" +
-      "<table class='build'><tr><th>Model</th><th class='num'>Median miss</th><th class='num'>Mean |log miss|</th><th class='num'>Within 3x</th><th class='num'>Rank corr.</th></tr>" +
-      ablationRow("TVL × one multiple", v.flatMedian, v.flatMeanAbsLog, v.flatWithin3, v.flatSpearman) +
-      ablationRow("+ size curve", v.looCurveMedian, v.looCurveMeanAbsLog, v.looCurveWithin3, v.looCurveSpearman) +
-      ablationRow("+ category family", v.looFamMedian, v.looFamMeanAbsLog, v.looFamWithin3, v.looFamSpearman) +
-      ablationRow("+ growth & seasoning", v.looMedian, v.looMeanAbsLog, v.looWithin3, v.looSpearman) +
+      "<table class='build'><tr><th>Model</th><th class='num'>Median miss</th><th class='num'>Mean |log miss|</th><th class='num'>Within 3x</th><th class='num'>Rank corr.</th><th class='num'>Walk-forward</th></tr>" +
+      ablationRow("TVL × one multiple", v.flatMedian, v.flatMeanAbsLog, v.flatWithin3, v.flatSpearman, v.wfRolling["flat"].median) +
+      ablationRow("+ size curve", v.looCurveMedian, v.looCurveMeanAbsLog, v.looCurveWithin3, v.looCurveSpearman, v.wfRolling["curve"].median) +
+      ablationRow("+ category family", v.looFamMedian, v.looFamMeanAbsLog, v.looFamWithin3, v.looFamSpearman, v.wfRolling["curve+family"].median) +
+      ablationRow("+ growth & seasoning", v.looMedian, v.looMeanAbsLog, v.looWithin3, v.looSpearman, v.wfRolling["curve+family+growth"].median) +
       "</table>" +
+      "<p class='fine'>Walk-forward is the rolling quartile split by listing date: the train set expands by one quarter at a time and the test set is the next quarter, pooled over " + v.wfRolling["curve+family+growth"].n + " test rows. It runs a little worse than the single time split (full model x" + v.wfRolling["curve+family+growth"].median.toFixed(2) + " vs x" + (v.timeCurveMedian || 0).toFixed(2) + ") — the newest tokens are the hardest to price, and the page shows that instead of hiding it.</p>" +
       "<h3>Same ablation, eight held-out folds (pooled out-of-fold)</h3>" +
       "<table class='build'><tr><th>Model</th><th class='num'>Median miss</th><th class='num'>Mean |log miss|</th><th class='num'>Within 3x</th><th class='num'>Rank corr.</th></tr>" +
       ablationRow("TVL × one multiple", ef["flat"].median, ef["flat"].meanAbsLog, ef["flat"].within3, ef["flat"].spearman) +
@@ -533,6 +545,19 @@
       ablationRow("+ growth & seasoning", ef["curve+family+growth"].median, ef["curve+family+growth"].meanAbsLog, ef["curve+family+growth"].within3, ef["curve+family+growth"].spearman) +
       "</table>" +
       "<p class='fine'>Each token is priced by a model refit without it; each fold is priced by a model fitted to the other seven folds. Rank corr. is Spearman between the blind prediction and the real market cap. <b>What earns its place:</b> the size curve (median miss x" + v.flatMedian.toFixed(2) + " → x" + v.looCurveMedian.toFixed(2) + ", within 3x " + pct(v.flatWithin3) + " → " + pct(v.looCurveWithin3) + "). <b>Family is a wash on the blind numbers</b> (median x" + v.looCurveMedian.toFixed(2) + " → x" + v.looFamMedian.toFixed(2) + ", within 3x " + pct(v.looCurveWithin3) + " → " + pct(v.looFamWithin3) + ") and is kept as a bounded prior for relative pricing between families, not because it improves the blind miss. <b>Growth earns on the median and within 3x</b> (x" + v.looFamMedian.toFixed(2) + " → x" + v.looMedian.toFixed(2) + ", " + pct(v.looFamWithin3) + " → " + pct(v.looWithin3) + "). <b>Seasoning is a bounded prior, not a finding:</b> the factor check below finds no age effect, so it is not fitted — it discounts young protocols by up to 40% and moves the median blind miss by about 0.05x (x3.25 without it, x3.20 with it). <b>Rank correlation is not the model's job:</b> the flat multiple ranks best (" + v.flatSpearman.toFixed(2) + ") because it preserves TVL order exactly; the curve trades a little rank order for much better point values. The full fit is kept because on identical folds it validates slightly better than the strict one (a difference inside noise, not a finding): fitting all " + v.fitSet.keepAll.n + " traded tokens instead of the strict " + v.fitSet.strict.n + " gives a blind miss of x" + v.fitSet.keepAll.median.toFixed(2) + " (mean |log miss| " + v.fitSet.keepAll.meanAbsLog.toFixed(3) + ") against x" + v.fitSet.strict.median.toFixed(2) + " (" + v.fitSet.strict.meanAbsLog.toFixed(3) + ") for the strict fit.</p>" +
+      "<h3>Launch odds: which terms survived both tests</h3>" +
+      "<table class='build'><tr><th>Term set</th><th class='num'>LOO Brier</th><th class='num'>LOO acc.</th><th class='num'>Walk-forward Brier</th><th class='num'>WF acc.</th><th>Verdict</th></tr>" +
+      D.odds.ablation.map(function (a) {
+        return "<tr><td>" + esc(a.spec) + "</td><td class='num'>" + a.looBrier.toFixed(3) + "</td><td class='num'>" + pct(a.looAcc) + "</td><td class='num'>" + a.wfBrier.toFixed(3) + "</td><td class='num'>" + pct(a.wfAcc) + "</td><td>" + (a.kept === null ? "base" : a.kept ? "kept" : "rejected") + "</td></tr>";
+      }).join("") +
+      "</table>" +
+      "<p class='fine'>Odds = P(a peer like this one has recorded a token), fitted by logistic regression on " + D.odds.peerCount + " dated peers in launchable categories (age, family, log TVL, 7-day growth; ridge 2), validated leave-one-out (Brier " + D.odds.loo.brier.toFixed(3) + ", " + pct(D.odds.loo.acc) + " right, vs a base rate of " + pct(D.odds.baseRate) + ") and walk-forward (Brier " + D.odds.wfPool.brier.toFixed(3) + "). A term is kept only if it lowers the Brier in BOTH tests. Family, size and growth pass; chain count and the control do not — the control is the 7-day growth of another row, which must not help, and it does not. It is a current-status probability, not a time-to-event forecast: it rises with age because older peers are more likely to have launched already. Walk-forward is weaker than leave-one-out (" + D.odds.wfPool.brier.toFixed(3) + " vs " + D.odds.loo.brier.toFixed(3) + ") — the odds are cross-sectional, and the page does not hide that.</p>" +
+      "<h3>Is the printed range honest?</h3>" +
+      "<table class='build'><tr><th></th><th class='num'>Leave-one-out</th><th class='num'>Walk-forward</th></tr>" +
+      "<tr><td>Actual cap inside P25–P75</td><td class='num'>" + pct(D.oddsCoverage.loo.p25_75) + "</td><td class='num'>" + pct(D.oddsCoverage.wf.p25_75) + "</td></tr>" +
+      "<tr><td>Actual cap inside P10–P90</td><td class='num'>" + pct(D.oddsCoverage.loo.p10_90) + "</td><td class='num'>" + pct(D.oddsCoverage.wf.p10_90) + "</td></tr>" +
+      "</table>" +
+      "<p class='fine'>The bands are the residual quantiles of the size curve: P25–P75 should hold about half the caps and P10–P90 about four fifths. Walk-forward bands are fitted on the pre-2024 tokens only, so the newer tokens never touch the band that judges them — its P10–P90 holds " + pct(D.oddsCoverage.wf.p10_90) + ", below the four-fifths the band promises.</p>" +
       "<h3>Family offsets</h3><table class='build'>" + famRows + "</table>" +
       "<p class='fine'>Median log residual per category, shrunk toward 1 by n / (n + 10) — 10 pseudo-tokens. A family with few tokens barely moves the board.</p>" +
       "<h3>Blind validation, continued</h3><table class='build'>" +
@@ -545,10 +570,7 @@
       "<h3>Farm verdicts</h3><p>Verdict is break-even odds: (fees + T-bill forgone) / slice — the launch probability the farm needs to cover its costs. <b>Worth farming</b> at break-even odds ≤ 10% (pays if 1 hold in 10 sees a launch), <b>marginal</b> at ≤ 25%, else <b>skip</b>; a 7-day TVL fall past -30% caps the verdict at marginal.</p>" +
       "<p>Farm economics: up to " + money(D.sliceCapital) + " of capital for " + D.farmDays + " days (a typical points-season window), the deposit scaled to the pool — 1bp of TVL, $500 to $5,000 — T-bill 4% a year less the deposit's 3.5% yield, so only the 0.5% spread is forgone, gas on the cheapest of the protocol's first three chains, a bridge leg each way at $1.00, claim $0.05. The deposit yield is a stated assumption, not a snapshot field: the median large stablecoin pool paid a 4.07% 30-day base APY against a 4.17% T-bill (DeFiLlama Research, 12 Nov 2026), so 3.5% sits below the median and is conservative. The farm is sized at " + money(D.sliceCapital) + " because that is the deployment a points-season farm actually runs; at a $1,000 cap the same rule gives " + D.countsAt1000.farm + " worth, " + D.countsAt1000.thin + " marginal and " + D.countsAt1000.skip + " skip, so the verdict still discriminates, but $5,000 is the calibrated size and the one the published top entry uses. At " + money(D.sliceCapital) + " it gives " + D.counts.farm + " worth, " + D.counts.thin + " marginal and " + D.counts.skip + " skip.</p>" +
       "<p>Net per hour is net divided by the plan's work hours. Work hours count the steps of a farm that runs to launch — 105 minutes; the stop rule's 15 minutes are not in the total, because a farm that runs to launch never pays them (its exit is the Exit step, paid once either way). The published top entry uses the same convention: its steps sum to 170 minutes and its total reads 155. The board's best on the watchlist is " + D.bestNetPerHour.map(function (r) { return r.name + " " + signed(r.netPerHour) + "/h"; }).join(", ") + ".</p>" +
-      "<h3>Why this board farms more than the published top entry</h3><p>The published top entry farms 57 of 181 at the same $5,000 / 42-day economics; this board farms " + D.counts.farm + " of " + D.rows.length + ". The gap is the output of the stated economics, not a target. Three honest differences drive it. " +
-      "<b>First, cost.</b> This board charges the cheapest gas of a protocol's first three chains plus $1.00 a bridge leg each way, a $0.05 mid-way action and a $0.05 claim — $2.16 to $2.25 on the cheapest chains — and forgives only the 0.5% spread between the 4% T-bill rate and the deposit's 3.5% yield (the median large stablecoin pool paid a 4.07% 30-day base APY against a 4.17% T-bill, DeFiLlama Research, 12 Nov 2026, so 3.5% sits below the median). The top entry's own printed odds and nets imply fees from $1.96 to $46.92, median $6.09 — and no rule reproduces them: the same dominant chain implies gas from $0.68 to $1.69 on Base and $0.53 to $1.88 on Ethereum, and single-chain rows imply impossible gas (Polygon $3.02, B² $6.32, Bitcoin $14.94). " +
-      "<b>Second, the curve.</b> The refit on all 128 traded tokens validates slightly better than the strict fit on identical folds (blind miss x" + v.fitSet.keepAll.median.toFixed(2) + " against x" + v.fitSet.strict.median.toFixed(2) + ") and lifts implied values at large TVL, so more slices clear the 10% break-even line. " +
-      "<b>Third, the line itself is crowded:</b> " + D.oddsNearLine + " of " + D.rows.length + " break-even odds sit within two points of 10% (median " + (100 * D.oddsMedian).toFixed(1) + "%), so small honest cost differences move many rows across it. The verdict rule is the same on both boards (break-even odds ≤10% worth, ≤25% marginal, a 7-day fall past −30% caps at marginal). Nothing here was tuned to reach 57.</p>" +
+      "<h3>Why this board farms fewer than the published top entry</h3><p>The published top entry farms 57 of 181 at the same $5,000 / 42-day economics; this board farms " + D.counts.farm + " of " + D.rows.length + ". The difference is the launch odds: the median row's odds are " + pct(D.launchOddsMedian) + ", so the median slice is about a third of the value-if-launches slice and far fewer rows clear the 10% break-even line. Total implied value is " + money(D.totalImpliedUsd) + " once each row is weighted by its odds, against " + money(D.totalIfLaunchesUsd) + " if every protocol launched. The verdict rule is the same on both boards (break-even odds ≤10% worth, ≤25% marginal, a 7-day fall past −30% caps at marginal). Nothing here was tuned to reach 57 — and nothing was tuned to reach " + D.counts.farm + " either.</p>" +
       "<h3>Not on the board</h3><table class='build'><tr><td>already record a token</td><td>" + D.tradedCount + "</td></tr>" + setAsideRows + "<tr class='total'><td>Total not on the board</td><td>" + (D.tradedCount + D.setAsideCount) + "</td></tr></table>" +
       "<p class='fine'>" + D.tradedCount + " record a token and are kept apart; " + D.setAsideCount + " more never reach the board by house rule: category CEX, Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking or Restaked BTC; a name carrying a whole word wrapped, staked or staking; a name ending in a version marker; a name beginning with an exchange; a name whose first word is one of its own chains — the chain's own product, whose token (if any) is the chain's token; or a name sharing its first word with a token that already trades. A protocol matching two rules is counted under the first. The watchlist is never set aside for its name: " + D.siblingHalf + " watchlist sibling stays on the board at half value. " + (D.namedChainWatchlist - D.namedChainWatchlistHalf) + " more watchlist protocols are named for their own chain and stay on the board at full value. A wrapped or staked product of a token that already trades is not a token that does not exist yet.</p>" +
       "<h3>board.json = this page</h3><p>" + esc(verify.text) + "</p>" +
